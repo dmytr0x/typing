@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#faf7f2" />
+    <title>Hearth · Typing for everyone</title>
+    <link rel="icon" href="favicon.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="style.css?v=8" />
+    <script type="module" src="app.js?v=13"></script>
+  </head>
+  <body>
+    <a class="skip-link" id="skip-link" href="#main">Skip to typing</a>
+    <header>
+      <a class="brand" href="#home"
+        ><span class="brand-mark">h</span> hearth<span class="brand-note"
+          >small steps, happy hands</span
+        ></a
+      ><button id="profile-button" class="subtle">Choose a learner</button>
+    </header>
+    <div class="shell">
+      <nav id="nav" aria-label="Main navigation"></nav>
+      <main id="main" tabindex="-1"></main>
+    </div>
+    <div id="notice" role="status" aria-live="polite"></div>
+    <div id="dialog" hidden></div>
+    <footer>
+      <span>A little practice goes a long way.</span
+      ><span id="save-status" role="status">Stored on this computer</span>
+    </footer>
+  </body>
+</html>
