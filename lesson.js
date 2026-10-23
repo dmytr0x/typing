@@ -7,14 +7,16 @@ import {
   mutate,
   profile,
   saveError,
+  pendingAttempt, keepDraft, clearDraft, reconcilePending,
 } from "./api.js";
 import { trainer } from "./trainer.js";
 import { playTypingSound, preloadSounds, soundForStroke } from "./sound.js?v=1";
-import { $, action, dialog, esc, keyLabel, oppositeShift } from "./ui.js";
+import { $, action, dialog, esc, keyLabel } from "./ui.js";
 
 let navigate = async () => {};
 let start = async () => {};
 let complete = async () => {};
+const typingResize = new ResizeObserver(() => paint());
 export function connect(handlers) {
   navigate = handlers.navigate;
   start = handlers.start;
@@ -58,9 +60,11 @@ function icon(name) {
 }
 
 async function saveSettings(patch) {
+  try {
   await mutate(() =>
     trainer.updateProfile(ctx.profileId, { ...profile().settings, ...patch }),
   );
+  } catch (error) { saveError(error); throw error; }
 }
 
 function pausedCue() {
@@ -72,13 +76,14 @@ function pauseLesson() {
   if (!ctx.engine?.running) return;
   ctx.engine.pause();
   ctx.dirty = true;
+  keepDraft();
   pausedCue();
   keepTypingFocus();
   return checkpoint();
 }
 
 function handleLessonKey(event) {
-  if (!ctx.engine || ctx.engine.finished || !$("#typing")) return;
+  if (!ctx.engine || ctx.engine.finished || ctx.recovering || !$("#typing")) return;
   if (event.key === "Escape") {
     event.preventDefault();
     pauseLesson()?.catch(saveError);
@@ -100,6 +105,7 @@ function handleLessonKey(event) {
     $("#input-cue").textContent = "You’ve got this. One key at a time.";
   ctx.dirty = true;
   const after = ctx.engine.result();
+  keepDraft();
   const held = holdingError(
     ctx.engine.attempt.text,
     ctx.engine.attempt.mode,
@@ -140,8 +146,18 @@ document.addEventListener("keydown", (event) => {
   handleLessonKey(event);
 });
 
-function renderKeyboard(attempt) {
-  const showPreview = attempt.kind === "lesson" && lesson(attempt.lesson_id)?.new_keys;
+function fingerId(finger) {
+  return finger.replaceAll(" ", "-");
+}
+
+function renderFingerLegend() {
+  const fingers = [...new Set(ctx.course.keyboard.flat().map((key) => key.finger)), "thumbs"];
+  return `<div class="finger-legend" aria-label="Finger colour map">${fingers.map((finger) =>
+    `<span data-finger="${fingerId(finger)}">${esc(finger === "thumbs" ? "Either thumb" : finger)}</span>`,
+  ).join("")}</div>`;
+}
+
+function renderKeyboard() {
   return ctx.course.keyboard
     .map(
       (row) =>
@@ -158,7 +174,9 @@ function renderKeyboard(attempt) {
                   : key.key === "Backspace"
                     ? "⌫"
                     : esc(key.key);
-            return `<span class="key${wide}${home}" data-key="${esc(key.key)}"${hand}>${label}</span>`;
+            const shifted = key.shift !== key.key && !/^[a-z]$/.test(key.key)
+              ? `<span class="key-shift" aria-hidden="true">${esc(key.shift)}</span>` : "";
+            return `<span class="key${wide}${home}" data-key="${esc(key.key)}" data-finger="${fingerId(key.finger)}"${hand} title="${esc(keyLabel(key.key))} · ${esc(key.finger)} finger">${shifted}${label}</span>`;
           })
           .join("")}</div>`,
     )
@@ -166,6 +184,7 @@ function renderKeyboard(attempt) {
 }
 
 export function openAttempt(attempt) {
+  typingResize.disconnect();
   ctx.view = "lesson";
   if (location.hash !== "#lesson") location.hash = "lesson";
   ctx.engine = new Engine(attempt, paint, complete);
@@ -186,7 +205,7 @@ export function openAttempt(attempt) {
         <p class="lesson-kicker">${esc(item?.stage || attempt.title || attempt.kind)}</p>
         <h1>${esc(title)}</h1>
       </div>
-      <div class="stats" aria-label="Live results"><span>Accuracy <strong id="live-accuracy">—</strong></span><span>WPM <strong id="live-wpm">—</strong></span><span id="timer">0:00</span></div>
+      <div class="stats" aria-label="Live results"><span>Accuracy <strong id="live-accuracy">—</strong></span><span ${profile().settings.quiet_practice ? "hidden" : ""}>WPM <strong id="live-wpm">—</strong></span><span id="timer">0:00</span></div>
       <div class="lesson-controls" aria-label="Lesson controls">
         <button type="button" id="pause" class="icon" aria-label="Pause" title="Pause (Esc)">${icon("pause")}</button>
         <button type="button" id="restart" class="icon" aria-label="Restart" title="Restart">${icon("restart")}</button>
@@ -204,15 +223,17 @@ export function openAttempt(attempt) {
         : ""
     }
     <div class="typing-stage">
-      <div id="typing" class="typing-box" tabindex="0" role="textbox" aria-label="Typing exercise. Type to begin or continue." aria-multiline="true" spellcheck="false"></div>
+      <div id="typing" class="typing-box" tabindex="0" role="textbox" aria-label="Typing exercise. Type to begin or continue." aria-describedby="character-description input-cue" aria-multiline="true" spellcheck="false"></div>
       <button type="button" id="start-cue" class="start-cue" tabindex="-1" hidden>Start typing</button>
     </div>
-    <p id="input-cue" class="lesson-cue" role="status">Press any key to begin.</p>
+    <div class="exercise-progress"><progress id="character-progress" max="${attempt.text.length}" value="0" aria-label="Exercise completion"></progress><span id="character-count"></span>${ctx.sessionPlan.length ? `<span>Step ${ctx.sessionIndex + 1} of ${ctx.sessionPlan.length} · ${esc(ctx.sessionPlan.map((p) => ({ review: "warm-up", lesson: "new lesson", familiar: "familiar practice" })[p.kind] || p.kind).join(" → "))}</span>` : ""}</div>
+    <p id="input-cue" class="lesson-cue" role="status">Press any key to begin.</p><p id="character-description" class="small"></p>
     <div id="hints" ${hints ? "" : "hidden"}>
-      <div class="keyboard" aria-label="Finger placement guide">${renderKeyboard(attempt)}<div class="key-row"><span class="key space" data-key=" ">Space · either thumb</span></div></div>
+      <div class="keyboard" aria-label="Finger placement guide">${renderKeyboard()}<div class="key-row"><span class="key space" data-key=" " data-finger="thumbs">Space · either thumb</span></div></div>
+      ${renderFingerLegend()}
       <p id="finger-hint" class="hint"></p>
     </div>
-    <div class="lesson-recovery"><button id="retry-save" hidden>Retry save</button><button id="export-pending" hidden>Export pending attempt</button><button id="reload-saved" hidden>Reload saved state</button></div>
+    <div class="lesson-recovery"><button id="retry-save" hidden>Retry save</button><button id="export-pending" hidden>Export pending attempt</button><button id="reload-saved" hidden>Reload saved state</button><button id="discard-pending" hidden>Discard pending work and leave</button></div>
     </div>`;
   $("#typing").style.fontSize = profile().settings.font_size + "px";
   action("start-cue", keepTypingFocus);
@@ -301,12 +322,13 @@ export function openAttempt(attempt) {
       phase: old.phase || 0,
     });
   });
-  action("retry-save", () => (ctx.pendingFinish ? complete() : checkpoint()));
+  action("retry-save", async () => {
+    try { await reconcilePending(); }
+    catch (error) { saveError(error); throw error; }
+    if (ctx.pendingFinish) await complete();
+  });
   action("export-pending", () =>
-    download("hearth-pending-attempt.json", {
-      attempt: ctx.engine.attempt,
-      checkpoint: ctx.engine.snapshot(),
-    }),
+    download("hearth-pending-attempt.json", pendingAttempt()),
   );
   action("reload-saved", async () => {
     if (
@@ -318,13 +340,29 @@ export function openAttempt(attempt) {
       }))
     )
       return;
-    await ctx.saveQueue;
+    await ctx.saveQueue.catch(() => {});
     ctx.state = await trainer.getState();
+    clearDraft(ctx.engine.attempt);
     ctx.engine = null;
+    ctx.pendingFinish = false; ctx.dirty = false; ctx.needsReconciliation = false;
+    await navigate("home");
+  });
+  action("discard-pending", async () => {
+    ctx.engine.pause(); keepDraft();
+    if (!await dialog({ title: "Discard pending typing?", body: "Unacknowledged keystrokes and this pending result will be discarded. Your last acknowledged checkpoint stays available.", confirmLabel: "Discard and leave", danger: true })) return;
+    await ctx.saveQueue.catch(() => {});
+    let saved = ctx.state;
+    let connected = true;
+    try { saved = await trainer.getState(); } catch { connected = false; }
+    clearDraft(ctx.engine.attempt);
+    ctx.state = saved; ctx.engine = null; ctx.pendingFinish = false;
+    ctx.dirty = false; ctx.needsReconciliation = !connected;
+    $("#reconnect-household").hidden = connected;
     await navigate("home");
   });
   if (!ctx.engine.ready) pausedCue();
   paint();
+  typingResize.observe($("#typing"));
   if (profile().settings.sound) preloadSounds();
   keepTypingFocus();
 }
@@ -410,7 +448,7 @@ function renderExercise(text, cursor, result, ms, startAt, end) {
     .map((run) => {
       const wpm = run.paced ? runWpm(run.words, ms) : null;
       let pace = "";
-      if (wpm !== null) {
+      if (wpm !== null && !profile().settings.quiet_practice) {
         const width = run.words[run.words.length - 1].end - run.words[0].start;
         const mood = width >= 10 ? paceMood(wpm) : { text: "", star: false };
         pace = `<span class="pace" aria-hidden="true"><span class="pace-label"><strong>${wpm.toFixed(0)}</strong> wpm${
@@ -499,6 +537,13 @@ export function paint() {
   while (end < text.length && text[end] !== " " && text[end] !== "\n") end += 1;
   const { ms } = timings(text, ctx.engine.attempt.mode, ctx.engine.events);
   $("#typing").innerHTML = renderExercise(text, cursor, result, ms, startAt, end);
+  $("#character-progress").value = result.correct;
+  $("#character-count").textContent = `${result.correct} of ${text.length} characters complete`;
+  const firstError = [...result.buffer].findIndex((char, i) => char !== text[i]);
+  const description = firstError >= 0
+    ? `At character ${firstError + 1}, typed ${keyLabel(result.buffer[firstError])}; expected ${keyLabel(text[firstError])}. Use Backspace ${cursor - firstError} time${cursor - firstError === 1 ? "" : "s"}, then type ${keyLabel(text[firstError])}.`
+    : cursor < text.length ? `Next: ${keyLabel(text[cursor])}, character ${cursor + 1}.` : "All characters complete.";
+  if ($("#character-description").textContent !== description) $("#character-description").textContent = description;
   keepCursorVisible($("#typing"));
   placeCue();
   $("#live-accuracy").textContent = result.attempted ? result.accuracy.toFixed(0) + "%" : "—";
@@ -511,33 +556,37 @@ export function paint() {
   );
   $("#timer").textContent = `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}${ctx.engine.attempt.duration ? " left" : ""}`;
   const held = holdingError(text, ctx.engine.attempt.mode, result.buffer);
-  const target = held ? "Backspace" : text[cursor];
+  const needsCorrection = held || (cursor >= text.length && firstError >= 0);
+  const target = needsCorrection ? "Backspace" : text[cursor];
   const secure = profile().skill_stats[target]?.secure;
   const showHint = ctx.forceHints || !secure;
+  const key = ctx.course.keyboard.flat().find((item) =>
+    item.key === target || item.shift === target || (target === "\n" && item.key === "Enter"),
+  );
+  const shiftHand = key && key.shift === target && key.shift !== key.key
+    ? key.finger.startsWith("left") ? "right" : "left" : "";
   document.querySelectorAll("[data-key]").forEach((element) => {
-    const key = ctx.course.keyboard.flat().find((item) => item.key === element.dataset.key);
     const shiftHit =
       element.dataset.key === "Shift" &&
-      oppositeShift(target) &&
-      element.dataset.hand === oppositeShift(target);
+      shiftHand && element.dataset.hand === shiftHand;
     element.classList.toggle(
       "target",
-      showHint &&
-        (element.dataset.key === target ||
-          key?.shift === target ||
-          (target === "\n" && element.dataset.key === "Enter") ||
-          shiftHit),
+      element.dataset.key === target ||
+        (element.dataset.key === key?.key && key?.key !== "Shift") ||
+        Boolean(shiftHit),
     );
   });
-  const key = ctx.course.keyboard
-    .flat()
-    .find((item) => item.key === target || item.shift === target);
+  document.querySelectorAll(".finger-legend [data-finger]").forEach((element) => {
+    const active = element.dataset.finger === fingerId(target === " " ? "thumbs" : key?.finger || "") ||
+      Boolean(shiftHand && element.dataset.finger === `${shiftHand}-little`);
+    element.classList.toggle("is-active", showHint && active);
+  });
   const hint = $("#finger-hint");
   if (!showHint) hint.textContent = "";
   else if (target === "Backspace")
     hint.textContent = "Backspace · right little finger";
   else if (key)
-    hint.textContent = `${key.finger} finger${key.shift === target ? " + opposite-hand Shift" : ""}`;
+    hint.textContent = `${keyLabel(target)} · ${key.finger} finger${shiftHand ? ` + ${shiftHand} Shift` : ""}`;
   else if (target === " ") hint.textContent = "Space · either thumb";
   else if (target === "\n") hint.textContent = "Enter · right little finger";
   else hint.textContent = keyLabel(target || "");

@@ -1,6 +1,8 @@
 import { action, applyTheme, esc, fingerSession, notify } from "./ui.js";
-import { ctx, lesson, lessons, mutate, profile, todayMinutes } from "./api.js";
-import { trainer } from "./trainer.js";
+import { ctx, lesson, lessons, mutate, profile, todayMinutes, restoreSession } from "./api.js";
+import { trainer, storageLocation } from "./trainer.js";
+import { minutesToday, progressCounts } from "./dates.js";
+import { offerDraft } from "./recovery.js";
 
 let navigate = async () => {};
 let start = async () => {};
@@ -24,7 +26,7 @@ export async function picker(force = false) {
       .map((item) => {
         const next = lessons().find((row) => !item.lesson_progress[row.id]);
         const minutes =
-          (Object.values(item.daily_summary).at(-1)?.milliseconds || 0) / 60000;
+          minutesToday(item);
         return `<button class="profile-card" data-profile="${item.id}"><span class="avatar">${esc(item.settings.avatar)}</span><h2>${esc(item.settings.name)}</h2><span class="small">${minutes.toFixed(1)} min today · next: ${esc(next?.group || "Practice")}</span></button>`;
       })
       .join(
@@ -37,8 +39,11 @@ export async function picker(force = false) {
           notify(error.message),
         )),
   );
+  let creating = false;
   document.querySelector("#new-profile").onsubmit = async (event) => {
     event.preventDefault();
+    if (creating) return;
+    creating = true;
     const data = new FormData(event.target),
       before = new Set(Object.keys(ctx.state.profiles));
     try {
@@ -55,39 +60,54 @@ export async function picker(force = false) {
       await handlersChoose(Object.keys(ctx.state.profiles).find((id) => !before.has(id)));
     } catch (error) {
       notify(error.message);
-    }
+    } finally { creating = false; }
   };
 }
 
 async function handlersChoose(id) {
+  await ctx.saveQueue.catch(() => {});
   ctx.profileId = id;
   sessionStorage.setItem("learner", id);
+  restoreSession();
+  await offerDraft();
   await navigate("home");
 }
 
 export async function home() {
-  ctx.recommendation = await trainer.recommendation(ctx.profileId);
+  try { ctx.recommendation = await trainer.recommendation(ctx.profileId); }
+  catch (error) {
+    notify(error.message);
+    ctx.recommendation = { next: lessons().find((row) => !profile().lesson_progress[row.id])?.id,
+      keys: "fj", explanation: "Reconnect to the household server before starting or saving more practice.", weak_fingers: [] };
+  }
   const p = profile(),
     next = lesson(ctx.recommendation.next),
     minutes = todayMinutes(),
-    count = Object.keys(p.lesson_progress).length,
-    done = minutes >= p.settings.daily_minutes;
+    count = progressCounts(p).completed,
+    done = minutes >= p.settings.daily_minutes && !ctx.sessionPlan[ctx.sessionIndex];
+  if (p.settings.backup_reminder) {
+    let last = null;
+    try { last = localStorage.getItem(`hearth-export:${trainer.kind}:${ctx.profileId}`); } catch { /* optional */ }
+    if (!last || Date.now() - Date.parse(last) > 7 * 86400000) notify("Keep a copy: export a dated backup from Settings. Your last export was over a week ago or has not been recorded.");
+  }
   document.querySelector("#main").innerHTML =
-    `<div class="eyebrow">A little practice. A little magic.</div><h1>Hey ${esc(p.settings.name)}!</h1><p>Settle in, stretch your fingers, and see what you can do.</p><section class="hero"><div class="hero-art" aria-hidden="true"><span>f</span><span>j</span><span>✦</span><span>a</span><span>s</span><span>d</span><span>k</span><span>l</span><span>;</span></div><div class="eyebrow">${p.active_session ? "Right where you left off" : next ? esc(next.stage + " · " + next.group) : "Your practice continues"}</div><h2>${p.active_session ? "Your practice is waiting." : done ? "That’s enough for today." : next ? esc(next.title) : "Find your own rhythm."}</h2><p>${p.active_session ? "Resume from your last saved checkpoint. Take your time." : done ? "Missed days have no penalty. Come back when you like, or take one more comfortable round." : "A short warm-up, one new step, and a comfortable finish. Accuracy comes first."}</p>${
+    `<div class="eyebrow">A little practice. A little magic.</div><h1>Hey ${esc(p.settings.name)}!</h1><p>Settle in, stretch your fingers, and see what you can do.</p><section class="hero"><div class="hero-art" aria-hidden="true"><span>f</span><span>j</span><span>✦</span><span>a</span><span>s</span><span>d</span><span>k</span><span>l</span><span>;</span></div><div class="eyebrow">${p.active_session ? "Right where you left off" : next ? esc(next.stage + " · " + next.group) : "Your practice continues"}</div><h2>${p.active_session ? "Your practice is waiting." : ctx.sessionPlan[ctx.sessionIndex] ? "Your next daily step is ready." : done ? "That’s enough for today." : next ? esc(next.title) : "Find your own rhythm."}</h2><p>${p.active_session ? "Resume from your last saved checkpoint. Take your time." : ctx.sessionPlan[ctx.sessionIndex] ? `Step ${ctx.sessionIndex + 1} of ${ctx.sessionPlan.length}: ${ctx.sessionPlan[ctx.sessionIndex].kind}. Continue your saved daily session, or finish whenever you like.` : done ? "Missed days have no penalty. Come back when you like, or take one more comfortable round." : "A short warm-up, one new step, and a comfortable finish. Accuracy comes first."}</p>${
       p.active_session
         ? '<button id="continue" class="primary">Resume practice &nbsp; →</button>'
         : done
           ? '<button id="one-more" class="primary">One more &nbsp; →</button>'
           : '<button id="continue" class="primary">Continue &nbsp; →</button>'
-    }<span class="small"> &nbsp; US QWERTY · no rush</span></section><div class="grid"><section class="card"><div class="row"><h2>A little, every day</h2><span class="tag">${p.settings.daily_minutes} min goal</span></div><span class="metric">${minutes.toFixed(1)} <span class="small">minutes today</span></span><progress value="${minutes}" max="${p.settings.daily_minutes}"></progress><p class="small">Missed a day? No problem. Your progress is always here.</p></section><section class="card"><h2>Growing confidence</h2><span class="metric">${count} <span class="small">of ${lessons().length} lessons</span></span><p>${p.achievements.length ? "✦ " + esc(p.achievements.at(-1)) : "Your first small step is worth taking."}</p><button id="open-course" class="subtle">Explore your course →</button></section></div><div class="banner">${esc(ctx.recommendation.explanation)} <button id="review">Practice these keys</button>${ctx.recommendation.weak_fingers?.[0] ? `<button id="train-finger">Train ${esc(ctx.recommendation.weak_fingers[0].label)}</button>` : ""}</div><details ${count ? "" : "open"}><summary>Before you begin · hands, posture, and keyboard check</summary><p>Sit comfortably with your feet supported and wrists relaxed. Rest your left fingers on A S D F and your right fingers on J K L ;. Feel the small bumps on F and J. Either thumb can press Space. Return to this position after reaching for a key.</p><p>Look at the text instead of your hands. Use the other hand’s Shift for capitals. The app can measure typing, but it cannot check which fingers you use or whether you look down.</p><label>Check your US keyboard: type fj ; / ?<input id="layout-check" autocomplete="off" spellcheck="false" placeholder="fj ; / ?"></label><p id="layout-feedback" class="small">This is an unscored layout check.</p><div class="actions"><button id="beginning">Start from the beginning</button><button id="placement">Optional placement assessment</button></div></details>`;
+    }<span class="small"> &nbsp; US QWERTY · no rush</span></section><div class="grid"><section class="card"><div class="row"><h2>A little, every day</h2><span class="tag">${p.settings.daily_minutes} min goal</span></div><span class="metric">${minutes.toFixed(1)} <span class="small">minutes today</span></span><progress value="${minutes}" max="${p.settings.daily_minutes}"></progress><p class="small">Missed a day? No problem. Your progress is always here.</p></section><section class="card"><h2>Growing confidence</h2><span class="metric">${count} <span class="small">of ${lessons().length} completed lessons</span></span><p class="small">${progressCounts(p).skipped} skipped separately</p><p>${p.achievements.length ? "✦ " + esc(p.achievements.at(-1)) : "Your first small step is worth taking."}</p><button id="open-course" class="subtle">Explore your course →</button></section></div><div class="banner">${esc(ctx.recommendation.explanation)} <button id="review">Practice these keys</button>${ctx.recommendation.weak_fingers?.[0] ? `<button id="train-finger">Train ${esc(ctx.recommendation.weak_fingers[0].label)}</button>` : ""}</div><details ${count ? "" : "open"}><summary>Before you begin · hands, posture, and keyboard check</summary><p>Sit comfortably with your feet supported and wrists relaxed. Rest your left fingers on A S D F and your right fingers on J K L ;. Feel the small bumps on F and J. Either thumb can press Space. Return to this position after reaching for a key.</p><p>Look at the text instead of your hands. Use the other hand’s Shift for capitals. The app can measure typing, but it cannot check which fingers you use or whether you look down.</p><label>Check your US keyboard: type fj ; / ?<input id="layout-check" autocomplete="off" spellcheck="false" placeholder="fj ; / ?"></label><p id="layout-feedback" class="small">This is an unscored layout check.</p><div class="actions"><button id="beginning">Start from the beginning</button><button id="placement">Optional placement assessment</button></div></details>`;
   action("continue", async () => {
     if (p.active_session) return start(null, p.active_session);
+    if (ctx.sessionPlan[ctx.sessionIndex]) return start(ctx.sessionPlan[ctx.sessionIndex]);
     if (done) return;
-    ctx.sessionPlan = [
+    await onboard();
+    ctx.sessionPlan = count ? [
       { kind: "review" },
       next ? { kind: "lesson", lesson_id: next.id } : { kind: "assessment" },
       { kind: "familiar" },
-    ];
+    ] : [{ kind: "lesson", lesson_id: next?.id || lessons()[0].id }, { kind: "familiar" }];
     ctx.sessionIndex = 0;
     await start(ctx.sessionPlan[0]);
   });
@@ -100,8 +120,41 @@ export async function home() {
     ctx.sessionIndex = 0;
     return start(ctx.sessionPlan[0]);
   });
-  action("beginning", () => start({ kind: "lesson", lesson_id: lessons()[0].id }));
-  action("placement", () => start({ kind: "placement" }));
+  async function onboard() {
+    if (!profile().learning.onboarding_done)
+      await mutate(() => trainer.updateLearning(ctx.profileId, { onboarding_done: true }));
+  }
+  action("beginning", async () => { await onboard(); return start({ kind: "lesson", lesson_id: lessons()[0].id }); });
+  action("placement", async () => { await onboard(); return start({ kind: "placement" }); });
+  const before = document.createElement("section");
+  if (!p.learning.onboarding_done) {
+    before.className = "card onboarding";
+    before.innerHTML = `<h2>Your first session</h2><p>1. You chose ${esc(p.settings.name)}. 2. Check your keyboard below. 3. Choose new to touch typing or optional placement.</p><p>New learners begin with F and J, then familiar practice. Later daily sessions offer warm-up → new lesson → familiar practice. Pause at any time.</p><p>Saving means keeping your place here: ${esc(storageLocation())}. There is no account or cloud copy. Export a backup from Settings.</p><button id="first-beginner" class="primary">New to touch typing</button><button id="first-placement">Try optional placement</button>`;
+    document.querySelector(".hero").before(before);
+    const checkKeyboard = (next) => {
+      if (document.querySelector("#layout-check").value === "fj ; / ?") document.querySelector(next).click();
+      else { document.querySelector("#layout-check").focus(); notify("Try the unscored keyboard check first. If keys differ, select US English input in your computer’s keyboard settings."); }
+    };
+    before.append(document.querySelector("#layout-check").closest("details"));
+    action("first-beginner", () => checkKeyboard("#beginning"));
+    action("first-placement", () => checkKeyboard("#placement"));
+  }
+  if (!p.learning.correction_done) {
+    const demo = document.createElement("section"); demo.className = "card";
+    demo.innerHTML = '<h2>Try a correction · unscored</h2><p>Target: f. Type x, press Backspace, then type f. In guided lessons, an error waits for Backspace. In fluent practice, you can continue, then Backspace to the error before finishing.</p><label>Correction demonstration<input id="correction-demo" autocomplete="off"></label><p id="demo-feedback" role="status">Type x to try an error.</p>';
+    document.querySelector(".hero").before(demo);
+    let step = 0;
+    document.querySelector("#correction-demo").onkeydown = async (event) => {
+      if (event.key === "Tab") return;
+      event.preventDefault();
+      if (step === 0 && event.key === "x") { step = 1; event.target.value = "x"; document.querySelector("#demo-feedback").textContent = "Typed x; expected f. Press Backspace to remove x."; }
+      else if (step === 1 && event.key === "Backspace") { step = 2; event.target.value = ""; document.querySelector("#demo-feedback").textContent = "Error removed. Now type f."; }
+      else if (step === 2 && event.key === "f") {
+        step = 3; event.target.value = "f"; document.querySelector("#demo-feedback").textContent = "Correct! This demonstration earned no score.";
+        try { await mutate(() => trainer.updateLearning(ctx.profileId, { correction_done: true })); } catch (e) { notify(e.message); }
+      }
+    };
+  }
   document.querySelector("#layout-check").oninput = (event) => {
     document.querySelector("#layout-feedback").textContent =
       event.target.value === "fj ; / ?"

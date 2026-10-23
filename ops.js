@@ -1,6 +1,6 @@
 import { COURSE, BY_ID, POOLS, available, fingerInstruction, fingerTitle, nextLesson, taught } from "./course-runtime.js";
 import { Conflict, Unchanged } from "./errors.js";
-import { emptyLearner, now, uid, validateSettings } from "./validate.js";
+import { emptyLearner, now, uid, validateSettings, validateLearning, validatePending } from "./validate.js";
 import {
   familiarText,
   fingerReport,
@@ -11,7 +11,7 @@ import {
   reviewText,
   score,
 } from "./scoring.js";
-import { ensureLength, normalizeText, repeatText } from "./text.js";
+import { normalizeText, repeatText, shorterLessonText } from "./text.js";
 
 const ASCII_UPPERCASE = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
 const PLACEMENT_SAMPLES = [
@@ -35,12 +35,31 @@ export function updateProfile(state, profileId, settings) {
   learner(state, profileId).settings = validateSettings(settings);
 }
 
+export function updateLearning(state, id, patch) {
+  const p = learner(state, id);
+  p.learning = validateLearning({ ...p.learning, ...patch });
+}
+
+export function restorePending(state, raw) {
+  const pending = validatePending(raw), incoming = pending.attempt;
+  if (alreadyFinished(state, incoming.owner, incoming.id)) throw new Unchanged();
+  const saved = active(learner(state, incoming.owner), incoming.id);
+  for (const key of Object.keys(saved)) {
+    if (["events", "elapsed_ms", "status", "paused"].includes(key)) continue;
+    if (JSON.stringify(saved[key]) !== JSON.stringify(incoming[key]))
+      throw new Conflict("Pending exercise identity does not match saved practice");
+  }
+  if (pending.finish) finishAttempt(state, incoming.owner, incoming.id, pending.checkpoint);
+  else checkpointAttempt(state, incoming.owner, incoming.id, pending.checkpoint);
+}
+
 export function manageProfile(state, profileId, action) {
   const profile = learner(state, profileId);
   if (action === "reset") {
     state.profiles[profileId] = emptyLearner({
       id: profileId,
       settings: profile.settings,
+      learning: profile.learning,
     });
   } else {
     delete state.profiles[profileId];
@@ -157,7 +176,7 @@ export function startAttempt(
     attempt.lesson_id = lesson.id;
     attempt.text = profile.settings.band === "adult" ? lesson.adult_text : lesson.text;
     if (shorter) {
-      attempt.text = ensureLength(attempt.text.split("\n")[0], attempt.text);
+      attempt.text = shorterLessonText(attempt.text);
       attempt.mode = "guided";
     } else {
       if (!profile.settings.short_exercises) attempt.text = repeatText(attempt.text, 2);

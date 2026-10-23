@@ -1,12 +1,13 @@
-import { checkpoint, ctx, mutate, profile, saveError } from "./api.js";
+import { checkpoint, ctx, mutate, profile, saveError, clearDraft, keepDraft, onHouseholdChange, coordinator, saveSession, restoreSession } from "./api.js";
 import { bindTrainer, trainer } from "./trainer.js";
-import { $, applyTheme, dialog, notify } from "./ui.js";
+import { $, applyTheme, dialog, notify, keyboardAccess } from "./ui.js";
 import { courseView, connect as connectCourse } from "./course.js";
 import { home, picker, connect as connectHome } from "./home.js";
-import { openAttempt, paint, connect as connectLesson } from "./lesson.js?v=11";
+import { openAttempt, paint, connect as connectLesson } from "./lesson.js?v=12";
 import { progressView, connect as connectProgress } from "./progress.js";
 import { practice, results, connect as connectResults } from "./results.js";
 import { settingsView, connect as connectSettings } from "./settings.js";
+import { offerDraft, startupRecovery } from "./recovery.js";
 
 const MAIN_VIEWS = ["home", "course", "practice", "progress", "settings", "profiles"];
 
@@ -21,8 +22,6 @@ function chrome() {
   document.body.classList.toggle("lesson-mode", ctx.view === "lesson");
   document.body.classList.toggle("results-mode", ctx.view === "results");
   applyTheme(profile());
-  if (ctx.view === "results")
-    $("meta[name=theme-color]")?.setAttribute("content", "#3d4a7c");
   const skip = document.querySelector("#skip-link");
   if (skip) skip.href = ctx.view === "lesson" ? "#typing" : "#main";
   $("#profile-button").textContent = profile()
@@ -32,28 +31,31 @@ function chrome() {
     ? ["Home", "Course", "Practice", "Progress", "Settings"]
         .map(
           (name, i) =>
-            `<button data-view="${name.toLowerCase()}" class="${ctx.view === name.toLowerCase() ? "active" : ""}">${["⌂", "▤", "⌨", "◷", "⚙"][i]} &nbsp; ${name}</button>`,
+            `<button data-view="${name.toLowerCase()}" ${ctx.view === name.toLowerCase() ? 'aria-current="page"' : ""} class="${ctx.view === name.toLowerCase() ? "active" : ""}">${["⌂", "▤", "⌨", "◷", "⚙"][i]} &nbsp; ${name}</button>`,
         )
         .join("")
     : "";
   document.querySelectorAll("[data-view]").forEach((button) => {
     button.onclick = () => navigate(button.dataset.view);
   });
+  keyboardAccess();
 }
 
 export async function navigate(next, { fromHash = false } = {}) {
   try {
     if (ctx.pendingFinish)
-      throw new Error("Save or export your pending result before leaving this exercise.");
+      throw new Error("Retry saving, or choose Discard pending work to leave this exercise.");
     if (ctx.engine) {
       ctx.engine.pause();
       await checkpoint();
       ctx.engine = null;
     }
+    await coordinator.tail;
     ctx.view = next;
   if (!fromHash && location.hash !== "#" + next) location.hash = next;
   chrome();
   await render();
+  if (!["lesson", "results"].includes(ctx.view)) $("#main").focus({ preventScroll: true });
   } catch (error) {
     notify(error.message);
   }
@@ -62,6 +64,7 @@ export async function navigate(next, { fromHash = false } = {}) {
 async function render() {
   if (!profile()) {
     await picker();
+    keyboardAccess();
     if (!profile()) chrome();
     return;
   }
@@ -79,9 +82,17 @@ async function render() {
   else if (ctx.view === "lesson" && profile().active_session)
     openAttempt(profile().active_session);
   else await home();
+  keyboardAccess();
 }
 
+let starting = false;
 async function start(options, existing) {
+  if (starting) return;
+  starting = true;
+  try { await startOnce(options, existing); }
+  finally { starting = false; }
+}
+async function startOnce(options, existing) {
   if (existing) {
     openAttempt(existing);
     chrome();
@@ -115,6 +126,7 @@ async function start(options, existing) {
     await mutate(() => trainer.abandonAttempt(ctx.profileId, saved.id));
   }
   await mutate(() => trainer.startAttempt(ctx.profileId, options));
+  saveSession();
   openAttempt(profile().active_session);
   chrome();
 }
@@ -122,14 +134,17 @@ async function start(options, existing) {
 async function complete() {
   if (!ctx.engine) return;
   ctx.pendingFinish = true;
+  keepDraft();
   const current = ctx.engine;
   try {
     await ctx.saveQueue.catch(() => {});
     await mutate(() =>
       trainer.finishAttempt(current.attempt.owner, current.attempt.id, current.snapshot()),
     );
-    ctx.lastAttempt = current.attempt;
+    ctx.lastAttempt = { ...current.attempt, ...current.snapshot() };
     ctx.lastResult = profile().attempts.find((result) => result.id === current.attempt.id);
+    clearDraft(current.attempt);
+    saveSession();
     ctx.engine = null;
     ctx.pendingFinish = false;
     results();
@@ -141,6 +156,15 @@ async function complete() {
 }
 
 const handlers = { navigate, start, complete, picker };
+$("#reconnect-household").onclick = async () => {
+  try {
+    if (ctx.engine) { saveError(new Error("Use the exercise recovery controls to keep or discard pending typing.")); return; }
+    await coordinator.tail;
+    ctx.state = await trainer.getState(); ctx.needsReconciliation = false;
+    $("#reconnect-household").hidden = true;
+    await render();
+  } catch (error) { notify(error.message); }
+};
 connectHome(handlers);
 connectCourse(handlers);
 connectLesson(handlers);
@@ -158,6 +182,7 @@ $("#profile-button").onclick = async () => {
       ctx.engine = null;
     }
     ctx.sessionPlan = [];
+    await coordinator.tail;
     await picker(true);
     chrome();
     location.hash = "profiles";
@@ -190,7 +215,7 @@ setInterval(() => {
   }
 }, 200);
 setInterval(() => {
-  if (ctx.engine && (ctx.dirty || ctx.engine.running) && !ctx.engine.finished)
+  if (ctx.engine && !ctx.needsReconciliation && (ctx.dirty || ctx.engine.running) && !ctx.engine.finished)
     checkpoint().catch(saveError);
 }, 2000);
 setInterval(() => {
@@ -204,8 +229,34 @@ setInterval(() => {
 window.addEventListener("beforeunload", (event) => {
   if (ctx.engine && (ctx.dirty || ctx.pendingFinish)) {
     event.preventDefault();
+    keepDraft();
     event.returnValue = "";
   }
+});
+let refreshing = false;
+onHouseholdChange(async () => {
+  if (!ctx.state || refreshing || coordinator.count) return;
+  refreshing = true;
+  try {
+    const saved = await trainer.getState();
+    if (saved.revision === ctx.state.revision) return;
+    const settingsPending = ctx.view === "settings" && (ctx.editingSettings || Object.keys(ctx.pendingSettings[ctx.profileId] || {}).length);
+    if (ctx.dirty || ctx.pendingFinish || ctx.engine?.running || settingsPending) {
+      ctx.engine?.pause(); keepDraft(); ctx.needsReconciliation = true;
+      if (settingsPending) {
+        notify("Another tab changed this household. Reconcile your pending settings with the saved household.");
+        $("#settings-reconnect").hidden = false;
+      } else saveError(new Error("Another tab changed this household. Reconcile pending typing or reload saved work."));
+    } else {
+      ctx.state = saved; ctx.needsReconciliation = false;
+      if (ctx.engine) {
+        const active = profile()?.active_session;
+        ctx.engine = null;
+        if (active) openAttempt(active); else { ctx.view = "home"; await render(); }
+      } else await render();
+    }
+  } catch (error) { notify(error.message); }
+  finally { refreshing = false; }
 });
 matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () =>
   applyTheme(profile()),
@@ -214,17 +265,12 @@ matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () =>
 try {
   await bindTrainer();
   [ctx.state, ctx.course] = await Promise.all([trainer.getState(), trainer.getCourse()]);
+  if (profile()) { restoreSession(); await offerDraft(); }
   const initial = viewFromHash();
   if (initial === "lesson" && profile()?.active_session) ctx.view = "lesson";
   else ctx.view = MAIN_VIEWS.includes(initial) ? initial : "home";
   if (!location.hash) history.replaceState({ view: "home" }, "", "#home");
   await render();
 } catch (error) {
-  $("#main").innerHTML =
-    `<section class="card"><h1>Your progress needs attention.</h1><p>${error.message}</p>${error.recovery ? '<button id="recover" class="primary">Restore last valid backup</button>' : '<button id="reload">Try again</button>'}<p class="small">${trainer?.kind === "local" ? "No progress has been reset. A browser backup can restore the last valid household." : "No progress has been reset. Keep the data folder intact."}</p></section>`;
-  document.querySelector("#recover")?.addEventListener("click", async () => {
-    await trainer.recover();
-    location.reload();
-  });
-  document.querySelector("#reload")?.addEventListener("click", () => location.reload());
+  startupRecovery(error);
 }

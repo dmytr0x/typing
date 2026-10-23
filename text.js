@@ -35,6 +35,15 @@ export function rotateWords(text) {
 
 export const MIN_LESSON_LENGTH = 100;
 
+export function shorterLessonText(text) {
+  text = normalizeText(text);
+  for (let end = MIN_LESSON_LENGTH; end < text.length; end++) {
+    if (/\s/.test(text[end]) && text.slice(0, end).trimEnd().length >= MIN_LESSON_LENGTH)
+      return text.slice(0, end).trimEnd();
+  }
+  return text;
+}
+
 export function ensureLength(
   text,
   filler = "",

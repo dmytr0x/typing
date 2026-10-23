@@ -38,6 +38,7 @@ const SETTINGS_FIELDS = [
   "font_size",
   "short_exercises",
   "font",
+  "quiet_practice", "backup_reminder",
 ];
 const EVENT_FIELDS = ["key", "ms"];
 const ATTEMPT_FIELDS = [
@@ -115,6 +116,7 @@ const LEARNER_FIELDS = [
   "placement_stage",
   "placement_done",
   "self_checks",
+  "learning",
 ];
 
 export const clock = {
@@ -249,6 +251,8 @@ export function validateSettings(raw) {
     font_size: requireInt(raw.font_size ?? 24, 18, 40, "font_size"),
     short_exercises: requireBool(raw.short_exercises, "short_exercises", true),
     font,
+    quiet_practice: requireBool(raw.quiet_practice, "quiet_practice", false),
+    backup_reminder: requireBool(raw.backup_reminder, "backup_reminder", false),
   };
 }
 
@@ -471,6 +475,40 @@ function validateSelfChecks(raw) {
   return out;
 }
 
+export function validateLearning(raw = {}) {
+  if (!isObject(raw)) throw new Error("Learning data must be an object");
+  forbidExtra(raw, ["passages", "custom_draft", "onboarding_done", "correction_done"], "Learning data");
+  const passages = raw.passages ?? [];
+  if (!Array.isArray(passages) || passages.length > 20) throw new Error("Save at most 20 passages");
+  const out = passages.map((p) => {
+    if (!isObject(p)) throw new Error("Passage must be an object");
+    forbidExtra(p, ["id", "title", "text", "favorite"], "Passage");
+    const id = requireString(p.id ?? uid(), "Passage ID"), title = requireString(p.title, "Passage title"), text = requireString(p.text, "Passage text");
+    if (!id.length || id.length > 80 || !title.length || title.length > 80 || !text.length || text.length > 10000)
+      throw new Error("Use a title of 1–80 characters and a passage of 1–10,000 characters");
+    return { id, title, text, favorite: requireBool(p.favorite, "favorite", false) };
+  });
+  if (new Set(out.map((p) => p.id)).size !== out.length) throw new Error("Duplicate passage ID");
+  if (out.reduce((n, p) => n + p.text.length, 0) > 100000) throw new Error("Passage library exceeds 100,000 characters");
+  const draft = requireString(raw.custom_draft ?? "", "Custom draft");
+  if (draft.length > 10000) throw new Error("Draft exceeds 10,000 characters");
+  return { passages: out, custom_draft: draft,
+    onboarding_done: requireBool(raw.onboarding_done, "onboarding_done", false),
+    correction_done: requireBool(raw.correction_done, "correction_done", false) };
+}
+
+export function validatePending(raw) {
+  if (!isObject(raw)) throw new Error("Choose a pending-attempt export");
+  forbidExtra(raw, ["format", "attempt", "checkpoint", "finish"], "Pending attempt");
+  if (raw.format !== undefined && raw.format !== "hearth-pending-v1") throw new Error("Unsupported pending-attempt format");
+  const attempt = validateAttempt(raw.attempt), cp = raw.checkpoint;
+  if (!isObject(cp)) throw new Error("Missing checkpoint");
+  forbidExtra(cp, ["events", "elapsed_ms", "status", "paused"], "Checkpoint");
+  if (!["running", "paused"].includes(cp.status)) throw new Error("Invalid checkpoint status");
+  return { format: "hearth-pending-v1", attempt, finish: requireBool(raw.finish, "finish", false),
+    checkpoint: { events: validateEvents(cp.events), elapsed_ms: requireInt(cp.elapsed_ms, 0, 3600000, "elapsed_ms"), status: cp.status, paused: requireBool(cp.paused, "paused", false) } };
+}
+
 export function validateLearner(raw) {
   if (!isObject(raw)) throw new Error("Learner must be an object");
   forbidExtra(raw, LEARNER_FIELDS, "Learner");
@@ -502,6 +540,7 @@ export function validateLearner(raw) {
     placement_stage: requireInt(raw.placement_stage ?? 0, 0, 4, "placement_stage"),
     placement_done: requireBool(raw.placement_done, "placement_done", false),
     self_checks: validateSelfChecks(raw.self_checks ?? {}),
+    learning: validateLearning(raw.learning),
   };
 }
 
@@ -521,6 +560,7 @@ export function emptyLearner(partial = {}) {
     placement_stage: partial.placement_stage,
     placement_done: partial.placement_done,
     self_checks: partial.self_checks,
+    learning: partial.learning,
   });
 }
 

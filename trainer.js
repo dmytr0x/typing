@@ -1,24 +1,18 @@
 import { createHttpTrainer } from "./http.js";
 import { createLocalTrainer } from "./local.js";
 import { loadCourse } from "./course-runtime.js";
+import { storageKind } from "./deployment.js";
 
 export let trainer = null;
 
 export async function detectKind() {
-  const requested = new URLSearchParams(location.search).get("storage");
-  if (requested === "http" || requested === "idb") return requested;
-  if (location.protocol === "file:") return "idb";
-  try {
-    const response = await fetch(new URL("api/state", location.href), {
-      method: "GET",
-      cache: "no-store",
-      headers: { Accept: "application/json" },
-    });
-    if (response.ok) return "http";
-  } catch {
-    /* static host or file */
-  }
-  return "idb";
+  return storageKind;
+}
+
+export function storageLocation() {
+  return storageKind === "http"
+    ? "Household file on this computer (local Python server)"
+    : "This browser on this computer (IndexedDB)";
 }
 
 async function loadCourseDocument() {

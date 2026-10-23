@@ -1,6 +1,7 @@
 import { attemptTitle, esc, fingerSession, keyLabel, notify } from "./ui.js";
 import { ctx, lesson, lessons, profile } from "./api.js";
 import { trainer } from "./trainer.js";
+import { minutesToday, localDate, progressCounts } from "./dates.js";
 
 let start = async () => {};
 export function connect(handlers) {
@@ -70,43 +71,58 @@ function fingerDashboard(fingers) {
 }
 
 export async function progressView() {
-  const p = profile(),
-    recent = p.attempts.slice(-20),
-    skills = Object.entries(p.skill_stats),
-    secure = skills.filter(([, s]) => s.secure).length,
-    assessments = p.assessment_history.filter((result) => result.duration),
-    duration = assessments.at(-1)?.duration,
-    same = assessments.filter((result) => result.duration === duration),
-    bestAccuracy = Math.max(0, ...Object.values(p.lesson_progress).map((item) => item.best_accuracy)),
-    bestWpm = Math.max(
-      0,
-      ...Object.values(p.lesson_progress).map((item) => item.best_wpm || 0),
-    );
+  const p = profile(), counts = progressCounts(p);
+  const skills = Object.entries(p.skill_stats), secure = skills.filter(([key, s]) => s.secure && (key === "\n" || key.length === 1 && key >= " " && key <= "~")).length;
   ctx.recommendation = await trainer.recommendation(ctx.profileId);
-  const fingers = ctx.recommendation.fingers || [];
-  document.querySelector("#main").innerHTML =
-    `<div class="eyebrow">See how far you’ve come</div><h1>Progress, at your pace.</h1><p>Accuracy, coverage, and speed grow together. Compare tests of the same duration.</p><div class="grid three"><section class="card"><h3>Course coverage</h3><span class="metric">${Object.values(p.lesson_progress).filter((x) => x.status === "completed").length}/${lessons().length}</span><p class="small">${Object.values(p.lesson_progress).filter((x) => x.status === "skipped").length} skipped separately</p></section><section class="card"><h3>Secure characters</h3><span class="metric">${secure}/95</span><p class="small">Two distinct exercises plus a later review</p></section><section class="card"><h3>Time well spent</h3><span class="metric">${(Object.values(p.daily_summary).reduce((sum, d) => sum + d.milliseconds, 0) / 60000).toFixed(0)} min</span><p class="small">No progress is lost for taking a break.</p></section></div>${fingerDashboard(fingers)}<div class="grid"><section class="card"><h3>Personal bests</h3><p>Accuracy ${bestAccuracy.toFixed(1)}% · ${bestWpm ? bestWpm.toFixed(1) + " WPM" : "speed still gathering"}</p><p class="small">${p.achievements.map(esc).join(" · ") || "Your first achievement is ahead."}</p></section><section class="card"><h3>Minutes today</h3><p>${((Object.values(p.daily_summary).at(-1)?.milliseconds || 0) / 60000).toFixed(1)} minutes on this local day.</p></section></div><section class="card"><h2>Keyboard heatmap</h2><div class="keyboard heatmap" aria-label="Error rates by key">${["`1234567890-=", "qwertyuiop[]\\", "asdfghjkl;'", "zxcvbnm,./"].map((row) => `<div class="key-row">${[...row].map((key) => `<span class="key ${heatColor(p.skill_stats[key])}">${esc(key)}</span>`).join("")}</div>`).join("")}</div></section><section class="card"><h2>Recent accuracy</h2><div class="sparkline" role="img" aria-label="Recent accuracy: ${recent.map((r) => r.score.accuracy.toFixed(0) + " percent").join(", ")}">${recent.map((r) => `<div class="bar" data-height="${r.score.accuracy}" title="${r.score.accuracy.toFixed(1)}%"></div>`).join("")}</div><h2>Recent WPM</h2><p class="small">Same-duration assessments only when comparing speed.</p><div class="sparkline" role="img" aria-label="Recent WPM">${same.map((r) => `<div class="bar" data-height="${Math.min(100, (r.score.wpm || 0) * 2)}" title="${r.score.wpm?.toFixed(1) || "—"}"></div>`).join("")}</div><div class="table-wrap"><table><thead><tr><th>Practice</th><th>Accuracy</th><th>WPM</th><th>Seconds</th></tr></thead><tbody>${recent
-      .slice()
-      .reverse()
-      .map((r) => {
-        const title = lesson(r.lesson_id)?.title || attemptTitle(r);
-        return `<tr><td>${esc(title)}</td><td>${r.score.accuracy.toFixed(1)}%</td><td>${r.score.wpm?.toFixed(1) || "—"}</td><td>${(r.score.elapsed_ms / 1000).toFixed(0)}${r.paused ? " · paused" : ""}</td></tr>`;
-      })
-      .join(
-        "",
-      )}</tbody></table></div></section><details><summary>Your keyboard · evidence by key</summary><div class="table-wrap"><table><thead><tr><th>Key</th><th>Samples</th><th>Errors</th><th>Next review</th><th>Confidence</th></tr></thead><tbody>${skills.map(([key, s]) => `<tr><td>${key === " " ? "Space" : key === "\n" ? "Enter" : esc(key)}</td><td>${s.samples}</td><td>${s.errors}</td><td>${s.due.slice(0, 10)}</td><td>${s.secure ? "Secure" : s.samples < 5 ? "Gathering evidence" : "Developing"}</td></tr>`).join("")}</tbody></table></div></details><details><summary>Practice calendar & achievements</summary><p>${p.achievements.map(esc).join(" · ") || "Your first achievement is ahead."}</p>${Object.entries(
-      p.daily_summary,
-    )
-      .slice(-30)
-      .map(([day, d]) => `<p>${day} · ${(d.milliseconds / 60000).toFixed(1)} minutes</p>`)
-      .join(
-        "",
-      )}</details><details><summary>Assessment history & individual milestones</summary><p>Your personal goal is ${p.settings.speed_goal} WPM over ${p.settings.assessment_seconds} seconds. The optional sustained-proficiency benchmark is 40 WPM with 97% accuracy on three different, unpaused 3-minute assessments across two days.</p>${p.assessment_history.map((r) => `<p>${r.date.slice(0, 10)} · ${r.duration}s · ${r.score.accuracy.toFixed(1)}% · ${r.score.wpm?.toFixed(1) || "—"} WPM ${r.paused ? "· paused" : ""} ${(r.score.wpm || 0) >= p.settings.speed_goal && r.score.accuracy >= 97 ? "· Personal milestone" : ""}</p>`).join("")}</details>`;
-  document.querySelectorAll("[data-finger]").forEach((button) => {
-    button.onclick = () => {
-      ctx.sessionPlan = fingerSession(button.dataset.finger);
-      ctx.sessionIndex = 0;
-      return start(ctx.sessionPlan[0]).catch((error) => notify(error.message));
-    };
+  const taught = ctx.recommendation.taught;
+  const trainable = (keys) => [...keys].every((key) => taught.includes(key));
+  const keyButton = (key, skill) => `<button data-review="${esc(key)}" ${trainable(key) && skill.samples >= 5 ? "" : "disabled"}>${esc(keyLabel(key))}</button>`;
+  const weakPairs = Object.entries(p.pair_stats).filter(([pair, s]) => trainable(pair) && s.latency_samples >= 5)
+    .sort((a, b) => b[1].latency_total / b[1].latency_samples - a[1].latency_total / a[1].latency_samples).slice(0, 5);
+  const kinds = [...new Set(p.attempts.map((r) => r.kind))];
+  const durations = [...new Set(p.assessment_history.map((r) => r.duration).filter(Boolean))].sort((a, b) => a-b);
+  document.querySelector("#main").innerHTML = `<div class="eyebrow">See how far you’ve come</div><h1>Progress, at your pace.</h1>
+    <div class="grid three"><section class="card"><h3>Completed lessons</h3><span class="metric">${counts.completed}/${lessons().length}</span><p>${counts.skipped} skipped · skipped lessons are not mastered</p></section>
+    <section class="card"><h3>Secure characters</h3><span class="metric">${secure}/96</span><p>95 printable characters plus Enter. Two distinct exercises and a later successful review.</p></section>
+    <section class="card"><h3>Minutes today</h3><span class="metric">${minutesToday(p).toFixed(1)}</span><p>${esc(localDate(p.settings.timezone))} · ${esc(p.settings.timezone)}</p></section></div>
+    <section class="card"><h2>Your next useful practice</h2><p>${esc(ctx.recommendation.explanation)}</p><button id="next-review" class="primary">Start recommended review</button><p>${secure ? `${secure} keys are secure; review keeps them comfortable.` : "Not enough evidence for secure keys yet. Accuracy practice builds it."}</p>
+    <h3>Slower pairs with evidence</h3><p>At least five timing samples. Timing suggests a useful review; it cannot measure your fingering.</p><div class="actions">${weakPairs.map(([pair, s]) => `<button data-review="${esc(pair)}">${esc([...pair].map(keyLabel).join(" → "))} · ${Math.round(s.latency_total / s.latency_samples)} ms (${s.latency_samples} samples)</button>`).join("") || "Not enough evidence yet."}</div></section>
+    ${fingerDashboard(ctx.recommendation.fingers || [])}
+    <section class="card"><h2>Keyboard heatmap</h2><p>Select a key with at least five samples to practice it. Error counts are readable without color.</p><div class="keyboard heatmap" aria-label="Error rates by key">${["`1234567890-=", "qwertyuiop[]\\", "asdfghjkl;'", "zxcvbnm,./", " \n"].map((row) => `<div class="key-row">${[...row].map((key) => {
+      const s = p.skill_stats[key];
+      return `<button class="key ${heatColor(s)}" data-review="${esc(key)}" ${s?.samples >= 5 && trainable(key) ? "" : "disabled"} aria-label="${esc(keyLabel(key))}: ${s ? `${s.errors} errors in ${s.samples} samples; ${s.secure ? "secure" : "developing"}` : "not enough evidence yet"}">${esc(keyLabel(key))}</button>`;
+    }).join("")}</div>`).join("")}</div></section>
+    <section class="card"><h2>Dated practice trends</h2><div class="grid"><label>Practice type<select id="trend-kind">${(kinds.length ? kinds : ["lesson"]).map((kind) => `<option>${esc(kind)}</option>`).join("")}</select></label>
+    <label>Test duration<select id="trend-duration">${(durations.length ? durations : [p.settings.assessment_seconds]).map((d) => `<option value="${d}">${d} seconds</option>`).join("")}</select></label></div>
+    <p id="trend-summary"></p><h3>Accuracy</h3><div id="accuracy-trend" class="sparkline"></div><h3>Speed</h3><p id="speed-context" class="small"></p><div id="speed-trend" class="sparkline"></div><div id="trend-table" class="table-wrap"></div></section>
+    <details><summary>Your keyboard · evidence by key</summary><div class="table-wrap"><table><caption>Key evidence and targeted reviews</caption><thead><tr><th>Key</th><th>Samples</th><th>Errors</th><th>Next review</th><th>Confidence</th></tr></thead><tbody>${skills.map(([key, s]) => `<tr><td>${keyButton(key, s)}</td><td>${s.samples}</td><td>${s.errors}</td><td>${esc(localDate(p.settings.timezone, new Date(s.due)))}</td><td>${s.secure ? "Secure" : s.samples < 5 ? "Not enough evidence yet" : "Developing"}</td></tr>`).join("")}</tbody></table></div></details>
+    <details><summary>Practice calendar & achievements</summary><p>${p.achievements.map(esc).join(" · ") || "Your first achievement is ahead."}</p>${Object.entries(p.daily_summary).sort(([a], [b]) => a.localeCompare(b)).slice(-30).map(([day, d]) => `<p>${esc(day)} · ${(d.milliseconds / 60000).toFixed(1)} minutes</p>`).join("")}</details>`;
+  function drawTrends() {
+    const kind = document.querySelector("#trend-kind").value, duration = Number(document.querySelector("#trend-duration").value);
+    const isTest = ["assessment", "challenge"].includes(kind);
+    document.querySelector("#trend-duration").disabled = !isTest;
+    const rows = p.attempts.filter((r) => r.kind === kind && (!isTest || r.duration === duration)).slice(-20);
+    const speedRows = rows.filter((r) => !r.paused && r.score.wpm !== null);
+    const scale = Math.max(1, ...speedRows.map((r) => r.score.wpm));
+    const compatible = rows.length ? rows.filter((r) => r.lesson_id === rows.at(-1).lesson_id && (r.lesson_id || r.text_digest === rows.at(-1).text_digest)) : [];
+    const halfway = Math.floor(compatible.length / 2);
+    const mean = (values) => values.reduce((n, r) => n + r.score.accuracy, 0) / values.length;
+    document.querySelector("#trend-summary").textContent = compatible.length >= 4
+      ? `Recent accuracy changed by ${(mean(compatible.slice(halfway)) - mean(compatible.slice(0, halfway))).toFixed(1)} percentage points across ${compatible.length} equivalent exercises.`
+      : "Not enough equivalent exercises to measure recent accuracy change yet.";
+    document.querySelector("#accuracy-trend").innerHTML = rows.map((r) => `<div class="bar" data-height="${r.score.accuracy}" title="${esc(localDate(p.settings.timezone, new Date(r.date)))} · ${r.score.accuracy.toFixed(1)}%"></div>`).join("");
+    document.querySelector("#speed-context").textContent = `Scale: 0–${scale.toFixed(1)} WPM. ${isTest ? `${duration}-second ${kind}s only.` : "Practice speeds depend on exercise text."} Paused tests are practice; missing speed is shown as unavailable in the table.`;
+    document.querySelector("#speed-trend").innerHTML = speedRows.map((r) => `<div class="bar" data-height="${r.score.wpm / scale * 100}" title="${esc(localDate(p.settings.timezone, new Date(r.date)))} · ${r.score.wpm.toFixed(1)} WPM"></div>`).join("");
+    document.querySelectorAll("[data-height]").forEach((bar) => bar.style.height = bar.dataset.height + "%");
+    document.querySelector("#trend-table").innerHTML = `<table><caption>Selected practice · accessible trend values</caption><thead><tr><th>Date</th><th>Exercise / type</th><th>Accuracy</th><th>WPM</th><th>Seconds</th></tr></thead><tbody>${rows.slice().reverse().map((r) => `<tr><td>${esc(localDate(p.settings.timezone, new Date(r.date)))}</td><td>${esc(lesson(r.lesson_id)?.title || attemptTitle(r))} · ${esc(r.kind)}${r.paused ? " · paused" : ""}</td><td>${r.score.accuracy.toFixed(1)}%</td><td>${r.score.wpm === null ? "Unavailable" : r.score.wpm.toFixed(1)}</td><td>${(r.score.elapsed_ms / 1000).toFixed(0)}</td></tr>`).join("")}</tbody></table>`;
+  }
+  document.querySelector("#trend-kind").onchange = drawTrends;
+  document.querySelector("#trend-duration").onchange = drawTrends;
+  drawTrends();
+  document.querySelector("#next-review").onclick = () => start({ kind: "review" }).catch((e) => notify(e.message));
+  document.querySelectorAll("[data-review]").forEach((button) => button.onclick = () => start({ kind: "review", keys: button.dataset.review }).catch((e) => notify(e.message)));
+  document.querySelectorAll("[data-finger]").forEach((button) => button.onclick = () => {
+    ctx.sessionPlan = fingerSession(button.dataset.finger); ctx.sessionIndex = 0;
+    return start(ctx.sessionPlan[0]).catch((error) => notify(error.message));
   });
 }

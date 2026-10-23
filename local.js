@@ -15,6 +15,7 @@ import {
   startAttempt,
   updateProfile,
   learner,
+  restorePending, updateLearning,
 } from "./ops.js";
 import { parseImport } from "./validate.js";
 
@@ -49,5 +50,15 @@ export function createLocalTrainer(store, course) {
       return change((state) => importInto(state, incoming, body.mode, body.target), true);
     },
     recover: () => Promise.resolve(store.recover()),
+    recoverImport: async (data, confirm = false) => {
+      const state = parseImport(data);
+      if (!confirm) return importPreview(state, "household", null);
+      if (!store.problem) throw new Error("Use Settings to import into a healthy household");
+      return store.recoverImport(state);
+    },
+    restorePending: (pending) => change((state) => restorePending(state, pending)),
+    updateLearning: (id, patch) => change((state) => updateLearning(state, id, patch)),
+    archives: () => store.archives(),
+    archiveState: (id) => store.archiveState(id),
   };
 }

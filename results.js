@@ -1,6 +1,8 @@
 import { action, dialog, esc, fingerSession, notify } from "./ui.js";
-import { ctx, lesson, lessons, mutate, profile } from "./api.js";
+import { ctx, lesson, lessons, mutate, profile, saveSession } from "./api.js";
 import { trainer } from "./trainer.js";
+import { shorterLessonText } from "./text.js";
+import { passageEditor, connectPassages } from "./passages.js";
 
 let navigate = async () => {};
 let start = async () => {};
@@ -38,7 +40,7 @@ function notesFrom(attempt) {
     const finger = (ctx.course?.fingers || []).find((item) =>
       item.keys.includes(missed[0]),
     );
-    if (finger) notes.push(`That is mostly your ${finger.id} finger.`);
+    if (finger) notes.push(`That key is assigned to the ${finger.id} finger on US QWERTY.`);
   }
   const swap = Object.entries(swaps).sort((a, b) => b[1] - a[1])[0];
   if (swap) {
@@ -85,7 +87,12 @@ function previousBest(result) {
       .attempts.filter(
         (row) =>
           row.id !== result.id &&
-          (result.lesson_id ? row.lesson_id === result.lesson_id : row.kind === result.kind),
+          row.kind === result.kind && row.lesson_id === result.lesson_id &&
+          row.duration === result.duration && row.paused === result.paused &&
+          (["assessment", "challenge"].includes(result.kind)
+            ? true : result.kind === "finger"
+              ? row.finger === result.finger && row.title === result.title
+              : row.text_digest === result.text_digest),
       )
       .map((row) => pointsFor(row.score)),
   );
@@ -113,11 +120,7 @@ function lessonLabel(result, item) {
 
 function ringMarkup(progress, kind) {
   const p = Math.max(0, Math.min(1, progress || 0));
-  const gradient =
-    kind === "speed"
-      ? `<defs><linearGradient id="summary-speed" x1="0" y1="1" x2="1" y2="0"><stop offset="0%" stop-color="#e58aa8"/><stop offset="55%" stop-color="#8ec5ea"/><stop offset="100%" stop-color="#7ed0c9"/></linearGradient></defs>`
-      : "";
-  return `<svg class="gauge-svg" viewBox="0 0 120 120" aria-hidden="true">${gradient}<circle class="gauge-track" cx="60" cy="60" r="52"/><circle class="gauge-value is-${kind}" cx="60" cy="60" r="52" pathLength="100" stroke-dasharray="100" stroke-dashoffset="100" data-offset="${(100 - p * 100).toFixed(2)}"/></svg>`;
+  return `<svg class="gauge-svg" viewBox="0 0 120 120" aria-hidden="true"><circle class="gauge-track" cx="60" cy="60" r="52"/><circle class="gauge-value is-${kind}" cx="60" cy="60" r="52" pathLength="100" stroke-dasharray="100" stroke-dashoffset="100" data-offset="${(100 - p * 100).toFixed(2)}"/></svg>`;
 }
 
 function starMarkup(filled, index) {
@@ -195,7 +198,10 @@ export function results() {
   const goal = profile().settings.speed_goal || 40;
   const stars = starsForAttempt(score.accuracy);
   const points = pointsFor(score);
-  const highscore = points > 0 && points >= previousBest(result);
+  const best = previousBest(result), highscore = points > best;
+  const tied = points > 0 && points === best;
+  const shorterLength = item ? shorterLessonText(profile().settings.band === "adult" ? item.adult_text : item.text).length : 0;
+  const canShorten = item && shorterLength < (ctx.lastAttempt?.text.length || 0);
   const title = lessonLabel(result, item);
   const speedScale = Math.max(80, goal, score.wpm || 0);
   const durationScale = Math.max(90000, score.elapsed_ms || 1);
@@ -208,7 +214,7 @@ export function results() {
       : score.complete
         ? result.passed
           ? "You completed the exercise. Your next step is ready."
-          : "You completed the exercise. Repeat when you feel ready to improve accuracy."
+          : `Accuracy was ${score.accuracy.toFixed(1)}%; this lesson needs ${threshold}%. Take a break or try a careful repeat.`
         : "Timed practice complete; only attempted positions were scored.";
   const spoken = [
     title,
@@ -228,6 +234,7 @@ export function results() {
         <p class="summary-learner">${esc(profile().settings.avatar)} ${esc(profile().settings.name)}</p>
       </header>
       <p class="visually-hidden">${esc(spoken)}</p>
+      <div class="result-recommendation"><h2>${result.lesson_id ? result.passed ? "Lesson passed" : "More accuracy practice will help" : "Practice saved"}</h2><p>${esc(status)}</p></div>
       <div class="summary-stage">
         <div class="summary-stars" aria-hidden="true">${[1, 2, 3, 4, 5].map((n) => starMarkup(n <= stars, n - 1)).join("")}</div>
         <div class="summary-gauges">
@@ -237,7 +244,7 @@ export function results() {
             <h2>accuracy</h2>
           </div>
           <div class="summary-gauge is-duration">
-            <div class="gauge-dial">${ringMarkup(score.elapsed_ms / durationScale, "duration")}<div class="gauge-readout"><strong id="summary-duration">0:00</strong><span class="gauge-sub">min : seconds</span></div></div>
+            <div class="gauge-dial">${ringMarkup(score.elapsed_ms / durationScale, "duration")}<div class="gauge-readout"><strong id="summary-duration">0:00</strong><span class="gauge-sub">min : sec</span></div></div>
             <h2>duration</h2>
           </div>
           <div class="summary-gauge is-speed">
@@ -248,23 +255,23 @@ export function results() {
         </div>
         <div class="summary-score">
           <strong id="summary-points">0</strong>
-          <p>${highscore ? "New highscore" : "Score"}</p>
+          <p>${highscore ? "New personal best for this exercise" : tied ? "Matched personal best" : "Score"}</p>
         </div>
       </div>
       <div class="summary-follow">
-        <p class="summary-note">${esc(status)}</p>
         <div class="banner">${esc(tip)}</div>
         ${result.kind === "placement" ? `<p>Placement sampled ${profile().placement_stage} of 4 skill groups successfully. ${profile().placement_done ? "Use the recommendation to begin with untested keys, or start from the beginning. Demonstrated groups are marked skipped, not mastered." : "Continue to sample the next group."}</p>` : ""}
         ${result.lesson_id?.endsWith("-5") ? `<label><input id="look-down" type="checkbox"> I did not look down (optional note, not proof of technique)</label>` : ""}
         <div class="actions">
-          <button id="result-continue" class="primary">${hasNext ? "Continue →" : "Done"}</button>
-          ${!result.passed && result.lesson_id ? '<button id="result-shorter">Retry shorter</button>' : ""}
+          <button id="recommended-next" class="primary">${!result.passed && result.lesson_id ? "Practice this lesson again" : hasNext ? "Continue →" : "Done"}</button>
+          ${!result.passed && result.lesson_id ? `<button id="result-continue">${hasNext ? "Continue →" : "Done"}</button>` : ""}
+          ${!result.passed && canShorten ? `<button id="result-shorter">Retry shorter · ${shorterLength} characters</button>` : ""}
           ${result.kind === "placement" && profile().placement_stage > 0 ? '<button id="apply-placement">Use placement recommendation</button>' : ""}
-          <button id="result-retry">Try again</button>
+          ${result.passed || !result.lesson_id ? '<button id="result-retry">Try again</button>' : ""}
           <button id="result-targeted">Targeted practice</button>
           ${hasNext ? '<button id="result-home">Finish for now</button>' : ""}
         </div>
-        <p class="small">WPM here means correctly completed characters ÷ 5 ÷ active minutes. Deleted characters are not counted twice. A speed value needs at least 10 correct characters and 5 seconds.</p>
+        <details class="summary-scoring small"><summary>How speed is calculated</summary><p>WPM here means correctly completed characters ÷ 5 ÷ active minutes. Deleted characters are not counted twice. A speed value needs at least 10 correct characters and 5 seconds.</p></details>
       </div>
     </section>`;
   playSummary({
@@ -273,15 +280,25 @@ export function results() {
     wpm: score.wpm,
     points,
   });
-  action("result-continue", async () => {
+  let advancing = false;
+  const continueResult = async () => {
+    if (advancing) return;
+    advancing = true;
+    try {
     if (result.kind === "placement" && !profile().placement_done)
       return start({ kind: "placement" });
     ctx.sessionIndex += 1;
+    saveSession();
     if (ctx.sessionPlan.length && ctx.sessionIndex < ctx.sessionPlan.length)
       return start(ctx.sessionPlan[ctx.sessionIndex]);
     ctx.sessionPlan = [];
+    saveSession();
     await navigate("home");
-  });
+    } catch (error) { advancing = false; throw error; }
+  };
+  action("result-continue", continueResult);
+  action("recommended-next", () => !result.passed && result.lesson_id
+    ? start({ kind: "lesson", lesson_id: result.lesson_id }) : continueResult());
   action("apply-placement", async () => {
     if (
       !(await dialog({
@@ -318,6 +335,7 @@ export function results() {
   });
   action("result-home", () => {
     ctx.sessionPlan = [];
+    saveSession();
     return navigate("home");
   });
   const box = document.querySelector("#look-down");
@@ -328,7 +346,7 @@ export function results() {
         trainer.selfCheck(ctx.profileId, result.lesson_id, "I did not look down"),
       );
     };
-  document.querySelector("#result-continue")?.focus({ preventScroll: true });
+  document.querySelector("#recommended-next")?.focus({ preventScroll: true });
 }
 
 export async function practice() {
@@ -342,7 +360,7 @@ export async function practice() {
     })
     .join("");
   document.querySelector("#main").innerHTML =
-    `<div class="eyebrow">Make it your own</div><h1>Pick your playground</h1><p>Follow a recommendation or choose what feels useful today.</p><div class="grid"><section class="card"><h2>A personal warm-up</h2><p>${esc(ctx.recommendation.explanation)}</p><button id="weak" class="primary">Practice recommended keys</button></section><section class="card"><h2>Selected keys</h2><form id="selected-form"><label>Already introduced keys<input id="selected-keys" value="${esc(ctx.recommendation.keys)}" maxlength="100"></label><button id="selected">Start focused practice</button></form></section><section class="card"><h2>Words & passages</h2><p>Revisit familiar words and natural sentences from keys you already know.</p><button id="words">Practice familiar text</button></section><section class="card"><h2>A moment of focus</h2><p>${profile().settings.assessment_seconds} seconds of mixed text. Hints are hidden. Pausing makes this a practice result.</p><button id="timed">Start timed assessment</button></section></div><section class="card"><h2>Finger gym</h2><p>Specialized lessons for one finger at a time: isolated keys, a rhythm drill, then words. Keys are inferred from US QWERTY assignments; the app cannot see which finger you used.</p><div class="actions finger-gym">${gym || '<p class="small">Finish a lesson to unlock finger drills.</p>'}</div></section><section class="card"><h2>Your own words</h2><p>Paste a passage here. Custom text is practice and does not unlock course skills.</p><form id="custom-form"><label>Passage<textarea id="custom-text" maxlength="10000" placeholder="A story, a note, or something you want to learn…"></textarea></label><button id="custom">Practice this text</button></form></section><div class="actions"><button id="challenge" ${Object.keys(profile().lesson_progress).length === ctx.course.lessons.length ? "" : "disabled"}>Calm challenge · opens after the course</button></div>`;
+    `<div class="eyebrow">Make it your own</div><h1>Pick your playground</h1><p>Follow a recommendation or choose what feels useful today.</p><div class="grid"><section class="card"><h2>A personal warm-up</h2><p>${esc(ctx.recommendation.explanation)}</p><button id="weak" class="primary">Practice recommended keys</button></section><section class="card"><h2>Selected keys</h2><form id="selected-form"><label>Already introduced keys<input id="selected-keys" value="${esc(ctx.recommendation.keys)}" maxlength="100"></label><button id="selected">Start focused practice</button></form></section><section class="card"><h2>Words & passages</h2><p>Revisit familiar words and natural sentences from keys you already know.</p><button id="words">Practice familiar text</button></section><section class="card"><h2>A moment of focus</h2><p>${profile().settings.assessment_seconds} seconds of mixed text. Hints are hidden. Pausing makes this a practice result.</p><button id="timed">Start timed assessment</button></section></div><section class="card"><h2>Finger gym</h2><p>Specialized lessons for one finger at a time: isolated keys, a rhythm drill, then words. Keys are inferred from US QWERTY assignments; the app cannot see which finger you used.</p><div class="actions finger-gym">${gym || '<p class="small">Finish a lesson to unlock finger drills.</p>'}</div></section>${passageEditor()}<div class="actions"><button id="challenge" ${Object.keys(profile().lesson_progress).length === ctx.course.lessons.length ? "" : "disabled"}>Calm challenge · opens after the course</button></div>`;
   action("weak", () => start({ kind: "review" }));
   document.querySelector("#selected-form").onsubmit = (event) => {
     event.preventDefault();
@@ -352,12 +370,7 @@ export async function practice() {
   };
   action("words", () => start({ kind: "familiar" }));
   action("timed", () => start({ kind: "assessment" }));
-  document.querySelector("#custom-form").onsubmit = (event) => {
-    event.preventDefault();
-    start({ kind: "custom", text: document.querySelector("#custom-text").value }).catch(
-      (error) => notify(error.message),
-    );
-  };
+  connectPassages(start);
   action("challenge", () => start({ kind: "challenge" }));
   document.querySelectorAll("[data-finger]").forEach((button) => {
     button.onclick = () => {

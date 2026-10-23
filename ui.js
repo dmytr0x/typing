@@ -22,12 +22,23 @@ export function status(message) {
 }
 export function action(id, handler) {
   const element = $("#" + id);
-  if (element)
-    element.addEventListener("click", () =>
-      Promise.resolve()
-        .then(handler)
-        .catch((error) => notify(error.message)),
-    );
+  if (element) {
+    element.tabIndex = 0;
+    element.addEventListener("click", async () => {
+      if (element.disabled || element.dataset.busy) return;
+      element.dataset.busy = "true";
+      element.setAttribute("aria-disabled", "true");
+      element.focus({ preventScroll: true });
+      try { await handler(); } catch (error) { notify(error.message); }
+      finally { if (element.isConnected) { delete element.dataset.busy; element.removeAttribute("aria-disabled"); } }
+    });
+  }
+}
+
+export function keyboardAccess() {
+  document.querySelectorAll("button, summary, a[href]").forEach((control) => {
+    if (!control.hasAttribute("tabindex")) control.tabIndex = 0;
+  });
 }
 
 export function dialog({
@@ -39,16 +50,36 @@ export function dialog({
 } = {}) {
   return new Promise((resolve) => {
     const root = $("#dialog");
+    const invoking = document.activeElement;
+    const surfaces = [...document.body.children].filter((el) => el !== root);
+    const prior = surfaces.map((el) => el.inert);
+    surfaces.forEach((el) => el.inert = true);
     root.hidden = false;
     root.innerHTML = `<div class="dialog-card" role="dialog" aria-modal="true" aria-labelledby="dialog-title"><h2 id="dialog-title">${esc(title)}</h2><p>${esc(body)}</p><div class="actions"><button id="dialog-cancel">${esc(cancelLabel)}</button><button id="dialog-ok" class="${danger ? "danger" : "primary"}">${esc(confirmLabel)}</button></div></div>`;
     const finish = (value) => {
       root.hidden = true;
       root.innerHTML = "";
+      root.removeEventListener("keydown", keys);
+      surfaces.forEach((el, i) => el.inert = prior[i]);
+      if (invoking?.isConnected) {
+        invoking.focus({ preventScroll: true });
+        requestAnimationFrame(() => { if (invoking.isConnected && root.hidden) invoking.focus({ preventScroll: true }); });
+      }
+      else $("#main")?.focus();
       resolve(value);
     };
+    const keys = (event) => {
+      if (event.key === "Escape") { event.preventDefault(); finish(false); }
+      if (event.key === "Tab") {
+        event.preventDefault();
+        const next = document.activeElement === $("#dialog-ok") ? $("#dialog-cancel") : $("#dialog-ok");
+        next.focus();
+      }
+    };
+    root.addEventListener("keydown", keys);
     $("#dialog-ok").onclick = () => finish(true);
     $("#dialog-cancel").onclick = () => finish(false);
-    $("#dialog-ok").focus();
+    $(danger ? "#dialog-cancel" : "#dialog-ok").focus();
   });
 }
 
@@ -61,13 +92,14 @@ export function applyTheme(profile) {
   root.dataset.theme = dark ? "dark" : "light";
   document.body.classList.toggle("readable-font", profile?.settings.font === "readable");
   document.body.classList.toggle("no-motion", !!profile?.settings.reduced_motion);
-  $("meta[name=theme-color]")?.setAttribute("content", dark ? "#1c1d2e" : "#faf7f2");
+  $("meta[name=theme-color]")?.setAttribute("content", getComputedStyle(root).getPropertyValue("--page").trim());
 }
 
 export function timezoneSelect(selected) {
   const zones = Intl.supportedValuesOf
     ? Intl.supportedValuesOf("timeZone")
     : [selected || "UTC"];
+  if (selected && !zones.includes(selected)) zones.unshift(selected);
   const groups = {};
   for (const zone of zones) {
     const region = zone.split("/")[0];
