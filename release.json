@@ -1,0 +1,68 @@
+{
+  "release": "courses-27d5ed552d54ef3b3de6",
+  "household_schemas": [
+    1,
+    2
+  ],
+  "protocol": 2,
+  "migration_enabled": false,
+  "ukrainian_enabled": false,
+  "catalog": [
+    {
+      "id": "en-qwerty",
+      "title": "English QWERTY",
+      "language": "en",
+      "layout_id": "us-qwerty",
+      "curriculum_version": 2,
+      "content_digest": "b6e565ac261fee2624cade6ff05fef3b2cca5ae227fed3c44494c0941b2e4c3c",
+      "asset": "courses/en-qwerty-v2.json"
+    },
+    {
+      "id": "uk-macos",
+      "title": "Українська · macOS",
+      "language": "uk",
+      "layout_id": "apple-ukrainian-pc-iso",
+      "curriculum_version": 1,
+      "content_digest": "d3be5c2bb5dcb86c135728d0dd16cc3a3696bd327aba5aa782f06c9e18fec138",
+      "asset": "courses/uk-macos-v1.json"
+    }
+  ],
+  "definitions": [
+    {
+      "id": "en-qwerty",
+      "title": "English QWERTY",
+      "language": "en",
+      "layout_id": "us-qwerty",
+      "curriculum_version": 1,
+      "content_digest": "de72287276155fa561522fb754a44f4c03ee8c4219093c9fab25db8a6f8bb89b",
+      "asset": "courses/en-qwerty-v1.json"
+    },
+    {
+      "id": "en-qwerty",
+      "title": "English QWERTY",
+      "language": "en",
+      "layout_id": "us-qwerty",
+      "curriculum_version": 2,
+      "content_digest": "b6e565ac261fee2624cade6ff05fef3b2cca5ae227fed3c44494c0941b2e4c3c",
+      "asset": "courses/en-qwerty-v2.json"
+    },
+    {
+      "id": "uk-ua",
+      "title": "Ukrainian · XKB legacy (ANSI)",
+      "language": "uk",
+      "layout_id": "xkb-ua-legacy-ansi",
+      "curriculum_version": 1,
+      "content_digest": "365e4e0cbb13863117beedc3825dd900051ea779d8bc82b77dcdb6de0f5a4301",
+      "asset": "courses/uk-ua-v1.json"
+    },
+    {
+      "id": "uk-macos",
+      "title": "Українська · macOS",
+      "language": "uk",
+      "layout_id": "apple-ukrainian-pc-iso",
+      "curriculum_version": 1,
+      "content_digest": "d3be5c2bb5dcb86c135728d0dd16cc3a3696bd327aba5aa782f06c9e18fec138",
+      "asset": "courses/uk-macos-v1.json"
+    }
+  ]
+}

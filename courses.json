@@ -1,0 +1,11 @@
+[
+  {
+    "id": "en-qwerty",
+    "title": "English QWERTY",
+    "language": "en",
+    "layout_id": "us-qwerty",
+    "curriculum_version": 2,
+    "content_digest": "b6e565ac261fee2624cade6ff05fef3b2cca5ae227fed3c44494c0941b2e4c3c",
+    "asset": "courses/en-qwerty-v2.json"
+  }
+]
