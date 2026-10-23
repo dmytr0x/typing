@@ -3,7 +3,7 @@ import { bindTrainer, trainer } from "./trainer.js";
 import { $, applyTheme, dialog, notify, keyboardAccess, esc, status } from "./ui.js";
 import { courseView, connect as connectCourse } from "./course.js";
 import { home, picker, connect as connectHome } from "./home.js";
-import { openAttempt, paint, connect as connectLesson } from "./lesson.js?v=12";
+import { openAttempt, paintStats, closeLesson, connect as connectLesson } from "./lesson.js?v=13";
 import { progressView, connect as connectProgress } from "./progress.js";
 import { practice, results, connect as connectResults } from "./results.js";
 import { settingsView, connect as connectSettings } from "./settings.js";
@@ -20,6 +20,7 @@ function viewFromHash() {
 }
 
 function chrome() {
+  if (ctx.view !== "lesson") closeLesson();
   document.body.classList.toggle("lesson-mode", ctx.view === "lesson");
   document.body.classList.toggle("results-mode", ctx.view === "results");
   applyTheme(profile());
@@ -282,7 +283,7 @@ document.addEventListener("visibilitychange", () => {
 setInterval(() => {
   if (ctx.engine?.running) {
     ctx.engine.tick();
-    if (ctx.engine) paint();
+    if (ctx.engine) paintStats();
   }
 }, 200);
 setInterval(() => {

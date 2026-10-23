@@ -12,11 +12,17 @@ import {
 import { trainer } from "./trainer.js";
 import { playTypingSound, preloadSounds, soundForStroke } from "./sound.js?v=1";
 import { $, action, dialog, esc, keyLabel } from "./ui.js";
+import { TypingViewport } from "./typing-viewport.js";
+import { supportedKey } from "./input-policy.js";
 
 let navigate = async () => {};
 let start = async () => {};
 let complete = async () => {};
-const typingResize = new ResizeObserver(() => paint());
+let passage = null;
+export function closeLesson() {
+  passage?.viewport.dispose();
+  passage = null;
+}
 export function connect(handlers) {
   navigate = handlers.navigate;
   start = handlers.start;
@@ -100,6 +106,9 @@ function handleLessonKey(event) {
   const before = ctx.engine.result();
   const beforeEvents = ctx.engine.events.length;
   const wasIdle = !ctx.engine.running;
+  if (!event.ctrlKey && !event.metaKey && !event.altKey && !event.repeat &&
+      (event.key === "Backspace" || event.key === "Enter" || supportedKey(event.key)))
+    passage?.viewport.follow(before.buffer.length, { input: true });
   ctx.engine.key(event);
   if (wasIdle && ctx.engine.running && !event.getModifierState?.("CapsLock"))
     $("#input-cue").textContent = "You’ve got this. One key at a time.";
@@ -184,7 +193,7 @@ function renderKeyboard() {
 }
 
 export function openAttempt(attempt) {
-  typingResize.disconnect();
+  closeLesson();
   ctx.view = "lesson";
   if (location.hash !== "#lesson") location.hash = "lesson";
   ctx.engine = new Engine(attempt, paint, complete);
@@ -364,8 +373,8 @@ export function openAttempt(attempt) {
     await navigate("home");
   });
   if (!ctx.engine.ready) pausedCue();
+  mountPassage();
   paint();
-  typingResize.observe($("#typing"));
   if (profile().settings.sound) preloadSounds();
   keepTypingFocus();
 }
@@ -432,82 +441,83 @@ function paceRuns(items, cursor) {
   return runs;
 }
 
-function renderChars(text, start, end, result) {
-  return [...text.slice(start, end)]
-    .map((char, offset) => {
-      const i = start + offset,
-        kind = letterState(text, result, i);
-      return `<span class="char${kind ? " " + kind : ""}">${char === "\n" ? "↵" : esc(char)}</span>`;
-    })
-    .join("");
+function mountPassage() {
+  const box = $("#typing"), text = ctx.engine.attempt.text;
+  const items = units(text), words = [], groups = paceRuns(items, Infinity);
+  const markup = groups.map(run => run.words.map((word, index) => {
+    const chars = Array.from({ length: word.end - word.start }, (_, offset) => {
+      const i = word.start + offset;
+      return `<span class="char" data-index="${i}">${text[i] === "\n" ? "↵" : esc(text[i])}</span>`;
+    }).join("");
+    words.push(word);
+    return `<span class="word">${index === 0 && !word.newline ? '<span class="pace" aria-hidden="true" hidden></span>' : ""}${chars}</span>${word.newline ? "<br>" : ""}`;
+  }).join("")).join("");
+  box.innerHTML = `<div class="typing-leading" aria-hidden="true"></div><div class="typing-passage">${markup}<span class="word end-word" aria-hidden="true"><span class="end-marker" data-index="${text.length}"></span></span></div><div class="typing-trailing" aria-hidden="true"></div>`;
+  const chars = [...box.querySelectorAll("[data-index]")];
+  const wordNodes = [...box.querySelectorAll(".word")];
+  const wordAt = [];
+  words.forEach((word, i) => {
+    for (let j = word.start; j < word.end; j++) wordAt[j] = wordNodes[i];
+  });
+  wordAt[text.length] = wordNodes.at(-1);
+  const groupAt = [];
+  groups.forEach(group => {
+    group.label = wordAt[group.words[0].start].querySelector('.pace');
+    for (let j = group.words[0].start; j < group.words.at(-1).end; j++) groupAt[j] = group;
+  });
+  passage = { chars, wordAt, groups, groupAt, cursor: null, eventCount: 0, ms: [],
+    viewport: new TypingViewport(box, chars, placeCue) };
+  passage.viewport.cursor = ctx.engine.result().buffer.length;
+  passage.viewport.reflow();
 }
 
-function renderExercise(text, cursor, result, ms, startAt, end) {
-  const current = units(text).find((item) => item.start <= cursor && cursor < item.end);
-  return paceRuns(
-    units(text).filter((item) => item.end > startAt && item.start < end),
-    cursor,
-  )
-    .map((run) => {
-      const wpm = run.paced ? runWpm(run.words, ms) : null;
-      let pace = "";
-      if (wpm !== null && !profile().settings.quiet_practice) {
-        const width = run.words[run.words.length - 1].end - run.words[0].start;
-        const mood = width >= 10 ? paceMood(wpm) : { text: "", star: false };
-        pace = `<span class="pace" aria-hidden="true"><span class="pace-label"><strong>${wpm.toFixed(0)}</strong> wpm${
-          mood.text
-            ? ` <span class="pace-mood">${esc(mood.text)}${mood.star ? "<span class='pace-star'>★</span>" : ""}</span>`
-            : ""
-        }</span></span>`;
-      }
-      const body = run.words
-        .map((word, index) => {
-          const chars = renderChars(text, word.start, word.end, result);
-          if (word.newline) return `${chars}<br>`;
-          const now = current && word.start === current.start ? " is-current" : "";
-          return `<span class="word${now}">${index === 0 ? pace : ""}${chars}</span>`;
-        })
-        .join("");
-      return `<span class="word-run${pace ? " has-pace" : ""}">${body}</span>`;
-    })
-    .join("");
+function updatePace(group, cursor) {
+  if (!group?.label) return;
+  const words = group.words.filter(word => word.end <= cursor);
+  const wpm = words.length ? runWpm(words, passage.ms) : null;
+  const label = group.label;
+  label.hidden = wpm === null || profile().settings.quiet_practice;
+  if (label.hidden) return;
+  const width = words.at(-1).end - words[0].start;
+  const mood = width >= 10 ? paceMood(wpm) : { text: "", star: false };
+  label.innerHTML = `<span class="pace-label"><strong>${wpm.toFixed(0)}</strong> wpm${mood.text
+    ? ` <span class="pace-mood">${esc(mood.text)}${mood.star ? '<span class="pace-star">★</span>' : ""}</span>` : ""}</span>`;
 }
 
-function lineBox(caret) {
-  return caret.closest(".word") || caret;
-}
-
-function nextLineBottom(box, caret) {
-  const current = lineBox(caret).getBoundingClientRect();
-  let nextTop = null,
-    bottom = null;
-  for (const node of box.querySelectorAll(".char")) {
-    const rect = node.getBoundingClientRect();
-    if (rect.top < current.top + current.height * 0.5) continue;
-    if (nextTop === null) nextTop = rect.top;
-    if (rect.top > nextTop + current.height * 0.5) break;
-    bottom = Math.max(bottom ?? rect.bottom, rect.bottom);
+function updatePassage(result) {
+  const text = ctx.engine.attempt.text, cursor = result.buffer.length;
+  const previous = passage.cursor;
+  const events = ctx.engine.events;
+  if (previous === null) {
+    passage.ms = timings(text, ctx.engine.attempt.mode, events).ms;
+  } else {
+    for (let i = passage.eventCount; i < events.length; i++) {
+      if (events[i].key === "Backspace") passage.ms.pop();
+      else passage.ms.push(events[i].ms);
+    }
   }
-  return bottom;
-}
-
-function keepCursorVisible(box) {
-  const caret = box.querySelector(".cursor");
-  if (!caret) return;
-  const lineHeight = lineBox(caret).getBoundingClientRect().height;
-  const roomForNext = box.clientHeight >= lineHeight * 1.8;
-  const nextBottom = nextLineBottom(box, caret);
-  const bounds = box.getBoundingClientRect();
-  const caretBox = caret.getBoundingClientRect();
-  if (roomForNext && nextBottom !== null && nextBottom > bounds.bottom - 4)
-    box.scrollTop += nextBottom - bounds.bottom + 4;
-  else if (caretBox.bottom > bounds.bottom - 12)
-    box.scrollTop += caretBox.bottom - bounds.bottom + 12;
-  const caretNow = caret.getBoundingClientRect(),
-    boxNow = box.getBoundingClientRect();
-  if (caretNow.top < boxNow.top + 12) box.scrollTop -= boxNow.top + 12 - caretNow.top;
-  else if (caretNow.bottom > boxNow.bottom - 12)
-    box.scrollTop += caretNow.bottom - boxNow.bottom + 12;
+  const changed = events.length !== passage.eventCount;
+  passage.eventCount = events.length;
+  // Only edited characters and the two cursor positions need new classes.
+  const from = previous === null ? 0 : Math.min(previous, cursor);
+  const to = previous === null ? text.length : Math.max(previous, cursor);
+  for (let i = from; i <= to; i++) {
+    const kind = i === text.length ? (i === cursor ? "cursor" : "") : letterState(text, result, i);
+    passage.chars[i].className = `${i === text.length ? "end-marker" : "char"}${kind ? " " + kind : ""}`;
+  }
+  if (previous !== null) passage.wordAt[previous].classList.remove('is-current');
+  passage.wordAt[cursor].classList.add('is-current');
+  if (previous === null || passage.quiet !== profile().settings.quiet_practice)
+    passage.groups.forEach(group => updatePace(group, cursor));
+  else if (changed) {
+    const groups = new Set([passage.groupAt[previous], passage.groupAt[cursor], passage.groupAt[cursor - 1]]);
+    groups.forEach(group => updatePace(group, cursor));
+  }
+  passage.quiet = profile().settings.quiet_practice;
+  passage.cursor = cursor;
+  if (previous === null || ctx.engine.running) passage.viewport.follow(cursor);
+  if (passage.running && !ctx.engine.running) passage.viewport.cancel();
+  passage.running = ctx.engine.running;
 }
 
 function placeCue() {
@@ -522,10 +532,22 @@ function placeCue() {
     caret = $("#typing .cursor") || box,
     stageBox = stage.getBoundingClientRect(),
     caretBox = caret.getBoundingClientRect();
-  const x = caretBox.left + caretBox.width / 2 - stageBox.left;
-  const y = caretBox.top - stageBox.top - cue.offsetHeight - 12;
+  const scale = stageBox.width / stage.offsetWidth;
+  const half = cue.offsetWidth / 2;
+  const x = Math.max(half + 6, Math.min(stageBox.width / scale - half - 6,
+    (caretBox.left + caretBox.width / 2 - stageBox.left) / scale));
+  const y = (caretBox.top - stageBox.top) / scale - cue.offsetHeight - 12;
+  const bounds = box.getBoundingClientRect();
+  // During manual review the caret may be clipped or outside the field. A
+  // floating start button there would cover unrelated text.
+  const top = Math.max((6 - stageBox.top) / scale, y);
+  if (caretBox.top < bounds.top || caretBox.bottom > bounds.bottom ||
+      top + cue.offsetHeight + 4 > (caretBox.top - stageBox.top) / scale) {
+    cue.hidden = true;
+    return;
+  }
   cue.style.left = `${x}px`;
-  cue.style.top = `${Math.max(6, y)}px`;
+  cue.style.top = `${top}px`;
 }
 
 export function paint() {
@@ -533,13 +555,7 @@ export function paint() {
   const result = ctx.engine.result(),
     cursor = result.buffer.length,
     text = ctx.engine.attempt.text;
-  let startAt = Math.max(0, Math.floor(cursor / 200) * 200 - 200);
-  while (startAt > 0 && text[startAt - 1] !== " " && text[startAt - 1] !== "\n")
-    startAt -= 1;
-  let end = Math.min(text.length, startAt + 700);
-  while (end < text.length && text[end] !== " " && text[end] !== "\n") end += 1;
-  const { ms } = timings(text, ctx.engine.attempt.mode, ctx.engine.events);
-  $("#typing").innerHTML = renderExercise(text, cursor, result, ms, startAt, end);
+  updatePassage(result);
   $("#character-progress").value = result.correct;
   $("#character-count").textContent = `${result.correct} of ${text.length} characters complete`;
   const firstError = [...result.buffer].findIndex((char, i) => char !== text[i]);
@@ -547,17 +563,8 @@ export function paint() {
     ? `At character ${firstError + 1}, typed ${keyLabel(result.buffer[firstError])}; expected ${keyLabel(text[firstError])}. Use Backspace ${cursor - firstError} time${cursor - firstError === 1 ? "" : "s"}, then type ${keyLabel(text[firstError])}.`
     : cursor < text.length ? `Next: ${keyLabel(text[cursor])}, character ${cursor + 1}.` : "All characters complete.";
   if ($("#character-description").textContent !== description) $("#character-description").textContent = description;
-  keepCursorVisible($("#typing"));
   placeCue();
-  $("#live-accuracy").textContent = result.attempted ? result.accuracy.toFixed(0) + "%" : "—";
-  const live = liveWpm(result.correct, ctx.engine.milliseconds());
-  $("#live-wpm").textContent = live === null ? "—" : live.toFixed(0);
-  const seconds = Math.floor(
-    (ctx.engine.attempt.duration
-      ? ctx.engine.attempt.duration * 1000 - ctx.engine.milliseconds()
-      : ctx.engine.milliseconds()) / 1000,
-  );
-  $("#timer").textContent = `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}${ctx.engine.attempt.duration ? " left" : ""}`;
+  paintStats(result);
   const held = holdingError(text, ctx.engine.attempt.mode, result.buffer);
   const needsCorrection = held || (cursor >= text.length && firstError >= 0);
   const target = needsCorrection ? "Backspace" : text[cursor];
@@ -594,4 +601,18 @@ export function paint() {
   else if (target === "\n") hint.textContent = "Enter · right little finger";
   else hint.textContent = keyLabel(target || "");
   $("#pause").disabled = !ctx.engine.running;
+}
+
+// Timer ticks have no passage writes, glyph measurements, or scroll requests.
+export function paintStats(result = ctx.engine?.result()) {
+  if (!result || !$("#live-accuracy")) return;
+  $("#live-accuracy").textContent = result.attempted ? result.accuracy.toFixed(0) + "%" : "—";
+  const live = liveWpm(result.correct, ctx.engine.milliseconds());
+  $("#live-wpm").textContent = live === null ? "—" : live.toFixed(0);
+  const seconds = Math.floor(
+    (ctx.engine.attempt.duration
+      ? ctx.engine.attempt.duration * 1000 - ctx.engine.milliseconds()
+      : ctx.engine.milliseconds()) / 1000,
+  );
+  $("#timer").textContent = `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}${ctx.engine.attempt.duration ? " left" : ""}`;
 }
