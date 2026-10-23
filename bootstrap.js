@@ -1,6 +1,6 @@
 // A missing dependency must produce a recoverable page before any storage opens.
 try {
-  await import("./app.js?v=15");
+  await import("./app.js?v=16");
 } catch (error) {
   const main = document.querySelector("#main");
   main.replaceChildren();

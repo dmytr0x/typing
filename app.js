@@ -48,8 +48,8 @@ function chrome() {
   }
   const choice = selector.closest("label");
   choice.hidden = !profile();
-  const courseSlot = ctx.view === "lesson" ? document.querySelector(".lesson-heading") : ctx.view === "results" ? document.querySelector(".summary-bar") : null;
-  if (courseSlot) courseSlot.append(choice);
+  const courseSlot = ctx.view === "lesson" ? document.querySelector(".lesson-panel") : ctx.view === "results" ? document.querySelector(".summary-bar") : null;
+  if (courseSlot) courseSlot.insertBefore(choice, courseSlot.querySelector(".stats"));
   else document.querySelector("#profile-button").before(choice);
   const catalog = [...ctx.catalog];
   for (const [id, value] of Object.entries(householdProfile()?.courses || {})) if (!catalog.some(c => c.id === id)) {

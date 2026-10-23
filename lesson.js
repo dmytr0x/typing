@@ -226,8 +226,11 @@ export function openAttempt(attempt) {
       <div id="typing" lang="${esc(ctx.course.language || "en")}" class="typing-box" tabindex="0" role="textbox" aria-label="Typing exercise. Type to begin or continue." aria-describedby="character-description input-cue" aria-multiline="true" spellcheck="false"></div>
       <button type="button" id="start-cue" class="start-cue" tabindex="-1" hidden>Start typing</button>
     </div>
-    <div class="exercise-progress"><progress id="character-progress" max="${attempt.text.length}" value="0" aria-label="Exercise completion"></progress><span id="character-count"></span>${ctx.sessionPlan.length ? `<span>Step ${ctx.sessionIndex + 1} of ${ctx.sessionPlan.length} · ${esc(ctx.sessionPlan.map((p) => ({ review: "warm-up", lesson: "new lesson", familiar: "familiar practice" })[p.kind] || p.kind).join(" → "))}</span>` : ""}</div>
-    <p id="input-cue" class="lesson-cue" role="status">Press any key to begin.</p><p id="character-description" class="small"></p>
+    <div class="exercise-progress">
+      <progress id="character-progress" max="${attempt.text.length}" value="0" aria-label="Exercise completion"></progress>
+      <div class="exercise-progress-details"><span id="character-count"></span>${ctx.sessionPlan.length ? `<span>Step ${ctx.sessionIndex + 1} of ${ctx.sessionPlan.length} · ${esc(ctx.sessionPlan.map((p) => ({ review: "warm-up", lesson: "new lesson", familiar: "familiar practice" })[p.kind] || p.kind).join(" → "))}</span>` : ""}</div>
+    </div>
+    <p id="input-cue" class="visually-hidden" role="status">Press any key to begin.</p><p id="character-description" class="visually-hidden"></p>
     <div id="hints" ${hints ? "" : "hidden"}>
       <div class="keyboard" aria-label="Finger placement guide">${renderKeyboard()}<div class="key-row"><span class="key space" data-key=" " data-finger="thumbs">Space · either thumb</span></div></div>
       ${renderFingerLegend()}
