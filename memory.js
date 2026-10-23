@@ -1,11 +1,14 @@
 import { Conflict, RecoveryRequired, Unchanged } from "./errors.js";
-import { emptyState, now, validateState } from "./validate.js";
+import { upgradeState, MIGRATION_ID, canonical } from "./migrate.js";
+import { sha256Hex } from "./scoring.js";
+import { emptyState, now, validateState, parseImport } from "./validate.js";
 
 function clone(value) {
   return structuredClone(value);
 }
 
-export function createMemoryStore(initialState) {
+export function createMemoryStore(initialState, {migrationEnabled = true} = {}) {
+  const migrationSnapshots = new Map();
   let current = null;
   let previous = null;
   let problem = null;
@@ -17,7 +20,13 @@ export function createMemoryStore(initialState) {
   } else if (initialState === undefined) {
     current = emptyState();
   } else {
-    current = validateState(clone(initialState));
+    if(initialState.schema_version !== 2 && !migrationEnabled) throw new RecoveryRequired("Course migration is disabled");
+    current = upgradeState(clone(initialState));
+    if(initialState.schema_version !== 2) {
+      const originals={current:clone(initialState)}, source_json=canonical(originals);
+      migrationSnapshots.set("pre-courses-schema-1-to-2",{format:"hearth-pre-courses-v1",migration:MIGRATION_ID,source_revision:current.revision,originals,source_json,checksum:sha256Hex(source_json)});
+      current.revision++;current.updated_at=now();
+    }
   }
 
   function read() {
@@ -25,7 +34,7 @@ export function createMemoryStore(initialState) {
     if (!current) {
       throw new RecoveryRequired("State is missing, corrupt, or uses an unsupported schema");
     }
-    return clone(current);
+    return validateState(clone(current));
   }
 
   function change(revision, operation, archive = false) {
@@ -55,14 +64,14 @@ export function createMemoryStore(initialState) {
     }
     previous = snapshot;
     current = validated;
-    return clone(current);
+    return validateState(clone(current));
   }
 
   function recover() {
     if (!previous) {
       throw new RecoveryRequired("State is missing, corrupt, or uses an unsupported schema");
     }
-    current = clone(previous);
+    current = upgradeState(clone(previous));
     problem = null;
     return read();
   }
@@ -74,7 +83,15 @@ export function createMemoryStore(initialState) {
     get initialized() {
       return initialized;
     },
-    archives,
+    archives: () => archives.map((state,index) => ({id:String(index),at:state.updated_at,profiles:Object.values(state.profiles).map(p=>p.settings.name)})),
+    archiveState: id => upgradeState(clone(archives[Number(id)])),
+    recoverImport(state) { current=parseImport(JSON.stringify(state));problem=null;return read(); },
+    retainImport(raw) {
+      parseImport(raw);const checksum=sha256Hex(raw);
+      migrationSnapshots.set(`pre-courses-import:${checksum}`,{format:"hearth-pre-courses-import-v1",migration:MIGRATION_ID,checksum,raw});
+    },
+    migrationSnapshots: () => [...migrationSnapshots].map(([id,s])=>({id,checksum:s.checksum,source_revision:s.source_revision})),
+    migrationSnapshot: id => clone(migrationSnapshots.get(id)),
     read,
     change,
     recover,

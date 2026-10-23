@@ -94,7 +94,7 @@ function handleLessonKey(event) {
   if (event.key === "Dead" || event.isComposing) {
     event.preventDefault();
     $("#input-cue").textContent =
-      "Use direct US keyboard input; composition and dead keys are not scored.";
+      "Use direct input from this course’s keyboard layout; composition and dead keys are not scored.";
     return;
   }
   const before = ctx.engine.result();
@@ -164,7 +164,7 @@ function renderKeyboard() {
         `<div class="key-row">${row
           .map((key) => {
             const wide = key.wide ? ` ${key.wide}` : "";
-            const home = "fj".includes(key.key) ? " home" : "";
+            const home = ctx.course.initial_keys.trim().includes(key.key) ? " home" : "";
             const hand = key.hand ? ` data-hand="${key.hand}"` : "";
             const label =
               key.key === "Shift"
@@ -174,7 +174,7 @@ function renderKeyboard() {
                   : key.key === "Backspace"
                     ? "⌫"
                     : esc(key.key);
-            const shifted = key.shift !== key.key && !/^[a-z]$/.test(key.key)
+            const shifted = key.shift !== key.key && key.shift !== key.key.toUpperCase()
               ? `<span class="key-shift" aria-hidden="true">${esc(key.shift)}</span>` : "";
             return `<span class="key${wide}${home}" data-key="${esc(key.key)}" data-finger="${fingerId(key.finger)}"${hand} title="${esc(keyLabel(key.key))} · ${esc(key.finger)} finger">${shifted}${label}</span>`;
           })
@@ -192,7 +192,7 @@ export function openAttempt(attempt) {
   ctx.pendingFinish = false;
   ctx.forceHints = false;
   ctx.stretchBoundary = 0;
-  const item = lesson(attempt.lesson_id),
+  const item = lesson(attempt.lesson_id, attempt.curriculum_version, attempt.course_id),
     hiddenKind = ["assessment", "placement"].includes(attempt.kind),
     hints = profile().settings.hints && !hiddenKind,
     sound = !!profile().settings.sound;
@@ -223,7 +223,7 @@ export function openAttempt(attempt) {
         : ""
     }
     <div class="typing-stage">
-      <div id="typing" class="typing-box" tabindex="0" role="textbox" aria-label="Typing exercise. Type to begin or continue." aria-describedby="character-description input-cue" aria-multiline="true" spellcheck="false"></div>
+      <div id="typing" lang="${esc(ctx.course.language || "en")}" class="typing-box" tabindex="0" role="textbox" aria-label="Typing exercise. Type to begin or continue." aria-describedby="character-description input-cue" aria-multiline="true" spellcheck="false"></div>
       <button type="button" id="start-cue" class="start-cue" tabindex="-1" hidden>Start typing</button>
     </div>
     <div class="exercise-progress"><progress id="character-progress" max="${attempt.text.length}" value="0" aria-label="Exercise completion"></progress><span id="character-count"></span>${ctx.sessionPlan.length ? `<span>Step ${ctx.sessionIndex + 1} of ${ctx.sessionPlan.length} · ${esc(ctx.sessionPlan.map((p) => ({ review: "warm-up", lesson: "new lesson", familiar: "familiar practice" })[p.kind] || p.kind).join(" → "))}</span>` : ""}</div>

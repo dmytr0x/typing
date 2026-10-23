@@ -1,21 +1,15 @@
 import { PythonRandom } from "./random.js";
-import {
-  BY_ID,
-  FINGER_HOME,
-  FINGER_ORDER,
-  POOLS,
-  fingerFor,
-  fingerLabel,
-  focusedPracticeText,
-  keysForFinger,
-  taught,
-} from "./course-runtime.js";
+import { defaultRuntime } from "./course-runtime.js";
+import { supportedKey } from "./input-policy.js";
 import { emptySkill, now } from "./validate.js";
 import { MIN_LESSON_LENGTH, ensureLength, normalizeText, repeatText } from "./text.js";
 
-export const MIN_FINGER_SAMPLES = 12;
-export const WEAK_ERROR_RATE = 0.05;
-export const SLOW_LATENCY_RATIO = 1.35;
+
+export function createScoring(runtime) {
+const { BY_ID, FINGER_HOME, FINGER_ORDER, POOLS, fingerFor, fingerLabel, focusedPracticeText, keysForFinger, taught } = runtime;
+const MIN_FINGER_SAMPLES = 12;
+const WEAK_ERROR_RATE = 0.05;
+const SLOW_LATENCY_RATIO = 1.35;
 
 const SHA256_K = [
   0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4,
@@ -34,7 +28,7 @@ function rotr(value, bits) {
   return (value >>> bits) | (value << (32 - bits));
 }
 
-export function sha256Hex(text) {
+function sha256Hex(text) {
   const encoded = new TextEncoder().encode(text);
   const withOne = encoded.length + 1;
   const paddedLen = Math.ceil((withOne + 8) / 64) * 64;
@@ -115,11 +109,11 @@ function characterLabel(key) {
   return key.toUpperCase();
 }
 
-export function holdingError(text, mode, buffer) {
+function holdingError(text, mode, buffer) {
   return Boolean(mode === "guided" && buffer.length && buffer.at(-1) !== text[buffer.length - 1]);
 }
 
-export function score(attempt) {
+function score(attempt) {
   const buffer = [];
   const first = new Map();
   let wrong = 0;
@@ -140,10 +134,8 @@ export function score(attempt) {
       }
       continue;
     }
-    const code = event.key.codePointAt(0);
     if (
-      event.key.length !== 1 ||
-      (event.key !== "\n" && !(code >= 32 && code <= 126))
+      !supportedKey(event.key)
     ) {
       throw new Error("Unsupported input");
     }
@@ -180,7 +172,7 @@ export function score(attempt) {
   };
 }
 
-export function evidence(attempt) {
+function evidence(attempt) {
   const buffer = [];
   const observations = [];
   let last = 0;
@@ -207,7 +199,8 @@ export function evidence(attempt) {
   return observations;
 }
 
-export function finish(learner, attempt) {
+function finish(learner, attempt) {
+  if (attempt.course_id && (attempt.course_id !== runtime.data.id || attempt.curriculum_version !== runtime.data.version)) throw new Error("Attempt course or curriculum mismatch");
   const resultScore = score(attempt);
   const timedEnd =
     attempt.duration != null && attempt.elapsed_ms === attempt.duration * 1000;
@@ -218,6 +211,8 @@ export function finish(learner, attempt) {
   const passed = resultScore.complete && resultScore.accuracy >= threshold;
   const result = {
     id: attempt.id,
+    course_id: attempt.course_id ?? runtime.data.id,
+    curriculum_version: attempt.curriculum_version ?? runtime.data.version,
     lesson_id: attempt.lesson_id ?? null,
     kind: attempt.kind,
     score: resultScore,
@@ -308,7 +303,7 @@ export function finish(learner, attempt) {
   if (attempt.kind === "placement") {
     if (resultScore.complete && resultScore.accuracy >= 95) learner.placement_stage += 1;
     else learner.placement_done = true;
-    if (learner.placement_stage >= 4) learner.placement_done = true;
+    if (learner.placement_stage >= runtime.data.placement_samples.length) learner.placement_done = true;
   }
   if (passed && !learner.achievements.includes("First steps")) {
     learner.achievements.push("First steps");
@@ -327,7 +322,7 @@ export function finish(learner, attempt) {
   return result;
 }
 
-export function proficiency(learner) {
+function proficiency(learner) {
   const qualifying = learner.assessment_history.filter(
     (result) =>
       result.duration === 180 &&
@@ -341,7 +336,7 @@ export function proficiency(learner) {
   return digests.size >= 3 && days.size >= 2;
 }
 
-export function fingerReport(learner) {
+function fingerReport(learner) {
   const allowed = taught(learner);
   const reports = [];
   for (const name of FINGER_ORDER) {
@@ -410,14 +405,14 @@ export function fingerReport(learner) {
   return reports;
 }
 
-export function fingerText(learner, finger, seed, phase = 0) {
+function fingerText(learner, finger, seed, phase = 0) {
   if (!(finger in FINGER_HOME)) throw new Error("Unknown finger");
   const allowed = taught(learner);
   const focus = keysForFinger(finger, allowed);
   if (!focus) throw new Error("This finger has no introduced keys yet");
   if (finger === "thumbs") {
     const letters = [...allowed].filter((character) => !" \n".includes(character));
-    const pool = letters.length ? letters : ["f"];
+    const pool = letters.length ? letters : [runtime.data.fallback_keys[0]];
     const generator = new PythonRandom(seed);
     const count = learner.settings.short_exercises ? 16 : 28;
     const tokens = Array.from({ length: count }, (_, index) =>
@@ -437,13 +432,13 @@ export function fingerText(learner, finger, seed, phase = 0) {
   });
   const text = ensureLength(body, filler);
   if (!text) {
-    const pool = [...focus].filter((character) => character !== "\n").join("") || "fj";
+    const pool = [...focus].filter((character) => character !== "\n").join("") || runtime.data.fallback_keys;
     return reviewText(learner, pool, seed);
   }
   return normalizeText(text);
 }
 
-export function recommendation(learner) {
+function recommendation(learner) {
   const allowed = taught(learner);
   const weak = Object.entries(learner.skill_stats)
     .filter(
@@ -503,7 +498,7 @@ export function recommendation(learner) {
   return [allowed.slice(0, 8), "Warm up with familiar keys before your next lesson."];
 }
 
-export function reviewText(learner, keys, seed) {
+function reviewText(learner, keys, seed) {
   const allowed = taught(learner);
   if (!keys || ![...keys].every((character) => allowed.includes(character))) {
     throw new Error("Choose keys already introduced in the course");
@@ -514,12 +509,12 @@ export function reviewText(learner, keys, seed) {
   return normalizeText(
     Array.from({ length: count }, () => {
       const token = Array.from({ length: 3 }, () => generator.choice(pool)).join("").trim();
-      return token || "f";
+      return token || runtime.data.fallback_keys[0];
     }).join(" "),
   );
 }
 
-export function familiarText(learner, seed) {
+function familiarText(learner, seed) {
   const allowed = taught(learner);
   const secureKeys = Object.entries(learner.skill_stats)
     .filter(([key, skill]) => skill.secure && allowed.includes(key))
@@ -543,11 +538,11 @@ export function familiarText(learner, seed) {
     }
     return ensureLength(tokens.join(" "), usable.slice(0, 12).reverse().join(" "));
   }
-  const first = reviewText(learner, poolKeys.slice(0, 8) || "fj", seed);
+  const first = reviewText(learner, poolKeys.slice(0, 8) || runtime.data.fallback_keys, seed);
   return repeatText(first, 1, { minimum_length: MIN_LESSON_LENGTH });
 }
 
-export function typingNotes(attempt) {
+function typingNotes(attempt) {
   const observations = evidence(attempt);
   const errors = {};
   const swaps = new Map();
@@ -583,3 +578,7 @@ export function typingNotes(attempt) {
   }
   return notes;
 }
+
+return { MIN_FINGER_SAMPLES, WEAK_ERROR_RATE, SLOW_LATENCY_RATIO, sha256Hex, holdingError, score, evidence, finish, proficiency, fingerReport, fingerText, recommendation, reviewText, familiarText, typingNotes };
+}
+export const { MIN_FINGER_SAMPLES, WEAK_ERROR_RATE, SLOW_LATENCY_RATIO, sha256Hex, holdingError, score, evidence, finish, proficiency, fingerReport, fingerText, recommendation, reviewText, familiarText, typingNotes } = createScoring(defaultRuntime);

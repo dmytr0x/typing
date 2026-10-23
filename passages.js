@@ -4,9 +4,9 @@ import { trainer } from "./trainer.js";
 import { normalizeText } from "./text.js";
 import { uid } from "./validate.js";
 
-export function textPreview(text) {
+export function textPreview(text, allowed = ctx.course?.allowed_characters || "\n" + Array.from({length:95},(_,i) => String.fromCharCode(i+32)).join("")) {
   const normalized = normalizeText(text);
-  const unsupported = [...new Set([...text].filter((c) => c !== "\n" && !(c >= " " && c <= "~") && !/\s/.test(c)))];
+  const unsupported = [...new Set([...text].filter((c) => !allowed.includes(c) && !/[ \t\r\n]/.test(c)))];
   // Tabs and CR are normalized to spaces/line endings; non-ASCII whitespace is shown too.
   return { normalized, unsupported, changed: normalized !== text };
 }
@@ -21,26 +21,37 @@ export function passageEditor() {
 }
 
 export function connectPassages(start) {
-  const owner = ctx.profileId;
+  const owner = ctx.profileId, courseId = ctx.courseId, adapter = trainer;
   const library = $("#passage-library");
   let editing = null, timer;
-  const draftKey = `hearth-editor:${trainer.kind}:${owner}`;
+  const draftKey = `hearth-editor:${adapter.kind}:${owner}:${courseId}`;
+  const oldKey = `hearth-editor:${adapter.kind}:${owner}`;
   let localDraft = null;
   try {
-    localDraft = localStorage.getItem(draftKey);
-    $("#passage-title").value = localStorage.getItem(draftKey + ":title") || "";
+    const stored = JSON.parse(localStorage.getItem(draftKey) || "null");
+    if (stored?.course_id === courseId && stored.curriculum_version === ctx.course.version) {
+      localDraft = stored.text; $("#passage-title").value = stored.title || "";
+    } else if (courseId === "en-qwerty") {
+      localDraft = localStorage.getItem(oldKey);
+      $("#passage-title").value = localStorage.getItem(oldKey + ":title") || "";
+      if (localDraft !== null) {
+        const replacement = JSON.stringify({course_id:courseId,curriculum_version:ctx.course.version,text:localDraft,title:$("#passage-title").value});
+        localStorage.setItem(draftKey,replacement);
+        if (localStorage.getItem(draftKey) !== replacement) throw new Error("Editor draft could not be verified");
+      }
+    }
   } catch { /* no browser storage */ }
   $("#custom-text").value = localDraft ?? profile().learning.custom_draft;
   const saveDraft = () => {
     const text = $("#custom-text").value;
-    try { localStorage.setItem(draftKey, text); localStorage.setItem(draftKey + ":title", $("#passage-title").value); } catch { /* server draft still available */ }
+    try { localStorage.setItem(draftKey, JSON.stringify({course_id:courseId,curriculum_version:ctx.course.version,text,title:$("#passage-title").value})); } catch { /* server draft still available */ }
     clearTimeout(timer);
-    timer = setTimeout(() => mutate(() => trainer.updateLearning(owner, { custom_draft: text }), `draft:${owner}`).catch((e) => notify(e.message)), 400);
+    timer = setTimeout(() => mutate(() => adapter.updateLearning(owner, { custom_draft: text }), `draft:${owner}:${courseId}`).catch((e) => notify(e.message)), 400);
   };
   const preview = () => {
     const p = textPreview($("#custom-text").value);
     $("#text-preview").textContent = p.unsupported.length
-      ? `Replace unsupported characters: ${p.unsupported.join(" ")}. Use US keyboard letters, symbols and Enter.`
+      ? `Replace unsupported characters: ${p.unsupported.join(" ")}. Use this course’s letters, symbols and Enter.`
       : `${p.normalized.length} characters. ${p.changed ? "Extra whitespace will be normalized; preview below." : "Ready for practice."}`;
     $("#normalized-text").textContent = p.normalized;
     $("#custom").disabled = !p.normalized || p.unsupported.length > 0;
@@ -54,7 +65,7 @@ export function connectPassages(start) {
     $("#custom").disabled = true;
     try {
       clearTimeout(timer);
-      await mutate(() => trainer.updateLearning(owner, { custom_draft: $("#custom-text").value }), `draft:${owner}`);
+      await mutate(() => adapter.updateLearning(owner, { custom_draft: $("#custom-text").value }), `draft:${owner}:${courseId}`);
       await start({ kind: "custom", text: p.normalized });
     } catch (e) { notify(e.message); }
     finally { if ($("#custom")) preview(); }
@@ -63,11 +74,11 @@ export function connectPassages(start) {
     const text = $("#custom-text").value, title = $("#passage-title").value.trim();
     if (!title || !text.trim()) throw new Error("Give the passage a title and some text.");
     await mutate(() => {
-      const passages = [...ctx.state.profiles[owner].learning.passages];
+      const passages = [...ctx.state.profiles[owner].courses[courseId].learning.passages];
       const index = passages.findIndex((p) => p.id === editing);
       const row = { id: editing || uid(), title, text, favorite: passages[index]?.favorite || false };
       if (index >= 0) passages[index] = row; else passages.push(row);
-      return trainer.updateLearning(owner, { passages, custom_draft: text });
+      return adapter.updateLearning(owner, { passages, custom_draft: text });
     });
     if (library.isConnected) { editing = null; $("#passage-title").value = ""; draw(); }
   });
@@ -92,7 +103,7 @@ export function connectPassages(start) {
             if (op === "practice" && !p.unsupported.length) await start({ kind: "custom", text: p.normalized });
           } else {
             if (op === "delete" && !await dialog({ title: "Delete this passage?", body: row.title, confirmLabel: "Delete", danger: true })) return;
-            await mutate(() => trainer.updateLearning(owner, { passages: ctx.state.profiles[owner].learning.passages
+            await mutate(() => adapter.updateLearning(owner, { passages: ctx.state.profiles[owner].courses[courseId].learning.passages
               .filter((p) => op !== "delete" || p.id !== row.id)
               .map((p) => p.id === row.id ? { ...p, favorite: !p.favorite } : p) }));
             draw();

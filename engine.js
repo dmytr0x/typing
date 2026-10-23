@@ -1,3 +1,4 @@
+import { supportedKey } from "./input-policy.js";
 export function holdingError(text, mode, buffer) {
   return Boolean(
     mode === "guided" &&
@@ -173,15 +174,15 @@ export class Engine {
       this.pause();
       return;
     }
-    if (!this.running) this.resume();
+    if (event.key === "Shift" && !this.running) this.resume();
     const key = event.key === "Enter" ? "\n" : event.key;
     if (
       key !== "Backspace" &&
-      (key.length !== 1 ||
-        (key !== "\n" && (key.charCodeAt(0) < 32 || key.charCodeAt(0) > 126)))
+      !supportedKey(key)
     )
       return;
     event.preventDefault();
+    if (!this.running) this.resume();
     if (!this.running) return;
     if (
       this.attempt.duration &&
@@ -197,7 +198,7 @@ export class Engine {
         holdingError(this.attempt.text, this.attempt.mode, current.buffer))
     )
       return;
-    this.events.push({ key, ms: Math.floor(this.milliseconds()) });
+    this.events.push({ key, ms: Math.floor(this.milliseconds()), ...(typeof event.code === "string" && event.code ? {code: event.code} : {}) });
     this.onChange();
     if (this.result().complete) this.finish();
   }

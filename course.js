@@ -7,46 +7,9 @@ export function connect(handlers) {
   start = handlers.start;
 }
 
-const LEVELS = [
-  {
-    id: "basic",
-    title: "Basic",
-    blurb: "Letter keys, starting on home row and reaching up and down.",
-    until: 15,
-  },
-  {
-    id: "intermediate",
-    title: "Intermediate",
-    blurb: "Fluent lowercase, then capitals and Enter.",
-    until: 21,
-  },
-  {
-    id: "advanced",
-    title: "Advanced",
-    blurb: "Punctuation, numbers, and the rest of the keyboard.",
-    until: 28,
-  },
-];
-const PHASES = [
-  "Meet the keys",
-  "Find a rhythm",
-  "Build connections",
-  "Use your skills",
-  "Checkpoint",
-];
-
-function groupNumber(item) {
-  return Number(item.id.slice(1, 3));
-}
-
-function phaseIndex(item) {
-  return Number(item.id.split("-")[1]) - 1;
-}
-
-function levelOf(item) {
-  const group = groupNumber(item);
-  return LEVELS.find((level) => group <= level.until);
-}
+function courseLevels() { return ctx.course.levels; }
+function phaseIndex(item) { return item.phase; }
+function levelOf(item) { return courseLevels().find(level => level.id === item.level); }
 
 function unlocked(item, progress) {
   return !item.prerequisite || Boolean(progress[item.prerequisite]);
@@ -113,7 +76,7 @@ function actionText(state, activeLessonId, itemId) {
 }
 
 function keyGlyphs(keys) {
-  if (!keys) return `<span class="key-glyph wide">a–z</span>`;
+  if (!keys) return `<span class="key-glyph wide">${ctx.course.language === "uk" ? "а–я" : "a–z"}</span>`;
   return [...keys]
     .slice(0, 4)
     .map((ch) => {
@@ -147,7 +110,7 @@ function starHtml(count) {
 function unitsOf(items) {
   const units = [];
   for (const item of items) {
-    const prefix = item.id.split("-")[0];
+    const prefix = item.group_id;
     const current = units.at(-1);
     if (!current || current.prefix !== prefix)
       units.push({
@@ -199,7 +162,7 @@ function lessonCard(item, number, p, nextId, groupKeys) {
   const record = p.lesson_progress[item.id];
   const attempted = p.attempts.some((result) => result.lesson_id === item.id);
   const state = lessonState(item, p.lesson_progress, nextId, attempted, p.skill_stats);
-  const phase = PHASES[phaseIndex(item)] || item.title;
+  const phase = item.phase_title || item.title;
   const action = actionText(state, p.active_session?.lesson_id, item.id);
   const label = `${number}. ${item.title}. ${statusText(state)}. ${action}.`;
   const stars = state === "done" || state === "mastered" ? starsFor(record) : 0;
@@ -263,14 +226,14 @@ export function courseView() {
     (item) => item.status === "skipped",
   ).length;
   let number = 0;
-  const path = `<ol class="course-path">${LEVELS.map((level) => {
+  const path = `<ol class="course-path">${courseLevels().map((level) => {
     const items = all.filter((item) => levelOf(item).id === level.id);
     const stats = tally(items, p.lesson_progress);
     const current = next && levelOf(next).id === level.id;
     const complete = stats.total > 0 && stats.finished === stats.total;
     return `<li class="${current ? "is-current" : ""} ${complete ? "is-complete" : ""}"><button type="button" data-jump="level-${esc(level.id)}">${esc(level.title)} · ${stats.finished}/${stats.total}</button></li>`;
   }).join("")}</ol>`;
-  const levels = LEVELS.map((level) => {
+  const levels = courseLevels().map((level) => {
     const items = all.filter((item) => levelOf(item).id === level.id);
     const stats = tally(items, p.lesson_progress);
     const current = next && levelOf(next).id === level.id;

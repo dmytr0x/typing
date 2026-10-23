@@ -1,13 +1,15 @@
 import { $, action, dialog, esc, notify } from "./ui.js";
 import { trainer, storageLocation } from "./trainer.js";
-import { ctx, mutate, readDraft, clearDraft } from "./api.js";
+import { ctx, mutate, readDraft, clearDraft, selectCourse, restoreSession, download } from "./api.js";
 import { validatePending } from "./validate.js";
 
 export async function offerDraft() {
   const pending = readDraft(ctx.profileId);
   if (!pending) return;
   const p = ctx.state.profiles[ctx.profileId];
-  if (p.attempts.concat(p.assessment_history).some((r) => r.id === pending.attempt?.id)) {
+  const courseId = pending.format === "hearth-pending-v2" ? pending.attempt.course_id : "en-qwerty";
+  const progress = p.courses[courseId];
+  if (progress && progress.attempts.concat(progress.assessment_history).some((r) => r.id === pending.attempt?.id)) {
     clearDraft(pending.attempt); return;
   }
   const restore = await dialog({ title: "Unfinished typing was kept on this computer",
@@ -17,6 +19,7 @@ export async function offerDraft() {
     try {
     await mutate(() => trainer.restorePending(validatePending(pending)));
     clearDraft(pending.attempt);
+    await selectCourse(courseId); restoreSession();
     } catch (e) { notify(e.message); }
   }
 }
@@ -26,15 +29,18 @@ export function startupRecovery(error) {
     <p>${esc(error.message)}</p><p><strong>Storage:</strong> ${esc(storageLocation())}</p>
     <p>No progress has been reset. Keep your household files or browser data intact.</p>
     <button id="reload" class="primary">Try again</button>
+    ${trainer ? '<button id="migration-preparation">Read-only course migration report</button><button id="export-original-household">Export original household</button><pre id="migration-report"></pre>' : ""}
     ${error.recovery && trainer ? '<button id="recover">Restore last valid backup</button><label>Import a household backup<input id="recovery-file" type="file" accept=".json,application/json"></label><button id="recovery-preview">Preview backup</button><div id="recovery-preview-result"></div>' : ""}</section>`;
   action("reload", () => location.reload());
+  action("migration-preparation", async () => { $("#migration-report").textContent=JSON.stringify(await trainer.migrationPreparation(),null,2); });
+  action("export-original-household", async () => { download("hearth-original-household.json",await trainer.originalHousehold()); });
   action("recover", async () => {
     if (!await dialog({ title: "Restore the previous household?", body: "The previous valid backup replaces the damaged or missing household. Damaged data is retained.", confirmLabel: "Restore backup", danger: true })) return;
     await trainer.recover(); location.reload();
   });
   action("recovery-preview", async () => {
     const file = $("#recovery-file").files[0];
-    if (!file || file.size > 10000000) throw new Error("Choose a household JSON backup smaller than 10 MB.");
+    if (!file) throw new Error("Choose a household JSON backup.");
     const data = await file.text(), preview = await trainer.recoverImport(data);
     $("#recovery-preview-result").innerHTML = `<p>Learners: ${preview.profiles.map(esc).join(", ")}. Replaces: entire household.</p><button id="recovery-confirm">Restore this household</button>`;
     action("recovery-confirm", async () => {

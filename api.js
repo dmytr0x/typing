@@ -1,5 +1,7 @@
 import { notify, status } from "./ui.js";
-import { trainer } from "./trainer.js";
+import { trainer, selectTrainer } from "./trainer.js";
+import { getCourse as bundledCourse } from "./course-registry.js";
+import { courseView, emptyCourse } from "./validate.js";
 import { Coordinator } from "./coordinator.js";
 import { minutesToday } from "./dates.js";
 
@@ -13,6 +15,8 @@ export function onHouseholdChange(handler) {
 export const ctx = {
   state: null,
   course: null,
+  courseId: "en-qwerty",
+  catalog: [],
   profileId: sessionStorage.getItem("learner"),
   view: "home",
   engine: null,
@@ -32,9 +36,30 @@ export const ctx = {
   editingSettings: false,
 };
 
-export const profile = () => ctx.state?.profiles[ctx.profileId];
+export const householdProfile = () => ctx.state?.profiles[ctx.profileId];
+export const profile = () => {
+  const raw = householdProfile();
+  if (!raw) return undefined;
+  if (raw.courses[ctx.courseId]) return courseView(raw, ctx.courseId);
+  return courseView({ ...raw, courses: { [ctx.courseId]: emptyCourse(ctx.course?.version ?? 2) } }, ctx.courseId);
+};
+export async function selectCourse(courseId) {
+  const progress = householdProfile()?.courses[courseId];
+  let definition;
+  try { definition = await trainer.getCourse(courseId, progress?.curriculum_version); }
+  catch (error) {
+    if (!progress) throw error;
+    definition = {id: courseId, title: courseId, version: progress.curriculum_version, unavailable: true, lessons: []};
+  }
+  ctx.courseId = courseId; ctx.course = definition;
+  selectTrainer(courseId);
+  if (ctx.profileId) sessionStorage.setItem(`hearth-course:${ctx.profileId}`, courseId);
+}
+export async function restoreCourseSelection() {
+  await selectCourse(sessionStorage.getItem(`hearth-course:${ctx.profileId}`) || "en-qwerty");
+}
 export const lessons = () => ctx.course.lessons;
-export const lesson = (id) => lessons().find((item) => item.id === id);
+export const lesson = (id, version = ctx.course.version, courseId = ctx.courseId) => { try { return bundledCourse(courseId,version).BY_ID[id]; } catch { return undefined; } };
 
 export function currentRevision() {
   return ctx.state.revision;
@@ -90,35 +115,41 @@ export function checkpoint() {
 }
 
 const draftSources = new WeakMap();
-function draftPrefix(owner) { return `hearth-draft:${trainer.kind}:${owner}:`; }
-function draftKey(owner) {
-  let tabId = sessionStorage.getItem("hearth-tab");
-  if (!tabId) { tabId = crypto.randomUUID(); sessionStorage.setItem("hearth-tab", tabId); }
-  return draftPrefix(owner) + tabId;
+function draftPrefix(owner, courseId = ctx.courseId) { return `hearth-draft:${trainer.kind}:${owner}:${courseId}:`; }
+// A duplicated tab inherits sessionStorage. Give every module lifetime its own
+// draft identity; older keys remain discoverable after reload or duplication.
+const draftTabId = crypto.randomUUID();
+function draftKey(owner, courseId = ctx.courseId) {
+  return draftPrefix(owner, courseId) + draftTabId;
 }
 export function pendingAttempt() {
-  return { format: "hearth-pending-v1", attempt: ctx.engine.attempt,
+  return { format: "hearth-pending-v2", attempt: ctx.engine.attempt,
     checkpoint: ctx.engine.snapshot(), finish: ctx.pendingFinish || ctx.engine.finished };
 }
 export function keepDraft() {
   if (!ctx.engine) return;
-  try { localStorage.setItem(draftKey(ctx.engine.attempt.owner), JSON.stringify(pendingAttempt())); }
+  try { localStorage.setItem(draftKey(ctx.engine.attempt.owner, ctx.engine.attempt.course_id), JSON.stringify(pendingAttempt())); }
   catch { status("Local draft unavailable — export pending work if saving fails"); }
 }
-export function readDraft(owner) {
+export function readDrafts(owner) {
+  const drafts = [];
   try {
-    const own = draftKey(owner);
-    const legacy = `hearth-draft:${trainer.kind}:${owner}`;
-    const key = localStorage.getItem(own) ? own : Object.keys(localStorage).find((key) => key.startsWith(draftPrefix(owner))) || legacy;
-    const pending = JSON.parse(localStorage.getItem(key) || "null");
-    if (pending?.attempt) draftSources.set(pending.attempt, key);
-    return pending;
-  }
-  catch { return null; }
+    const prefix = `hearth-draft:${trainer.kind}:${owner}`;
+    for (const key of Object.keys(localStorage).filter(key => key === prefix || key.startsWith(prefix + ":")).sort()) {
+      try {
+        const pending = JSON.parse(localStorage.getItem(key));
+        if (pending?.attempt?.owner !== owner) continue;
+        draftSources.set(pending.attempt, key);
+        drafts.push(pending);
+      } catch { /* Other drafts remain discoverable and raw storage is retained. */ }
+    }
+  } catch { /* Storage may be unavailable; in-memory pending work remains. */ }
+  return drafts;
 }
+export function readDraft(owner) { return readDrafts(owner)[0] || null; }
 export function clearDraft(attempt) {
   try {
-    const key = draftSources.get(attempt) || draftKey(attempt.owner);
+    const key = draftSources.get(attempt) || draftKey(attempt.owner, attempt.course_id || "en-qwerty");
     const draft = JSON.parse(localStorage.getItem(key) || "null");
     if (draft?.attempt.id === attempt.id) localStorage.removeItem(key);
   } catch { /* storage may be unavailable; in-memory pending work remains */ }
@@ -137,15 +168,16 @@ export async function reconcilePending() {
   } finally { ctx.recovering = false; }
 }
 export function saveSession() {
-  try { localStorage.setItem(`hearth-session:${trainer.kind}:${ctx.profileId}`,
-    JSON.stringify({ plan: ctx.sessionPlan, index: ctx.sessionIndex,
+  try { localStorage.setItem(`hearth-session:${trainer.kind}:${ctx.profileId}:${ctx.courseId}`,
+    JSON.stringify({ course_id: ctx.courseId, curriculum_version: ctx.course.version, plan: ctx.sessionPlan, index: ctx.sessionIndex,
       attemptId: profile()?.active_session?.id || ctx.lastResult?.id })); }
   catch { /* session presentation is optional; attempt saving is separate */ }
 }
 export function restoreSession() {
   ctx.sessionPlan = []; ctx.sessionIndex = 0;
   try {
-    const saved = JSON.parse(localStorage.getItem(`hearth-session:${trainer.kind}:${ctx.profileId}`) || "null");
+    const saved = JSON.parse(localStorage.getItem(`hearth-session:${trainer.kind}:${ctx.profileId}:${ctx.courseId}`) || (ctx.courseId === "en-qwerty" ? localStorage.getItem(`hearth-session:${trainer.kind}:${ctx.profileId}`) : null) || "null");
+    if (saved?.course_id && (saved.course_id !== ctx.courseId || saved.curriculum_version !== ctx.course.version)) return;
     const valid = saved && Number.isInteger(saved.index) && saved.index >= 0 && Array.isArray(saved.plan) && saved.plan.length <= 10 && saved.plan.every((item) => item && typeof item === "object" && ["review", "lesson", "familiar", "assessment", "finger"].includes(item.kind));
     if (!valid || saved.index >= saved.plan.length) return;
     if (saved.attemptId === profile()?.active_session?.id) {

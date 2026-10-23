@@ -1,47 +1,45 @@
-import { COURSE, BY_ID, POOLS, available, fingerInstruction, fingerTitle, nextLesson, taught } from "./course-runtime.js";
+import { defaultRuntime } from "./course-runtime.js";
+import { getCourse } from "./course-registry.js";
+import { validateTarget } from "./input-policy.js";
 import { Conflict, Unchanged } from "./errors.js";
-import { emptyLearner, now, uid, validateSettings, validateLearning, validatePending } from "./validate.js";
-import {
-  familiarText,
-  fingerReport,
-  fingerText,
-  finish,
-  proficiency,
-  recommendation,
-  reviewText,
-  score,
-} from "./scoring.js";
+import { emptyLearner, emptyCourse, courseView, now, uid, validateSettings, validateLearning, validatePending } from "./validate.js";
+import { createScoring } from "./scoring.js";
 import { normalizeText, repeatText, shorterLessonText } from "./text.js";
 
-const ASCII_UPPERCASE = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
-const PLACEMENT_SAMPLES = [
-  "fj dk sl a; gh ru ei wo qp ty vm c, x. z/ bn",
-  ASCII_UPPERCASE + "\nThe Quiet Fox Jumps Over A Blue Log.\n",
-  'Who said: "It is fine!"? I did; don\'t rush. ',
-  "0123456789 !@#$%^&*() _+=[]{}\\|`~<> /-",
-];
 
-export function learner(state, profileId) {
+export function createOperations(runtime) {
+const courseId = runtime.data.id;
+const { COURSE, BY_ID, POOLS, available, fingerInstruction, fingerTitle, nextLesson, taught } = runtime;
+const { familiarText, fingerReport, fingerText, finish, proficiency, recommendation, reviewText, score } = createScoring(runtime);
+function learner(state, profileId) {
   if (!(profileId in state.profiles)) throw new Error("Learner not found");
-  return state.profiles[profileId];
+  const view = courseView(state.profiles[profileId], courseId);
+  if (view.curriculum_version !== runtime.data.version) throw new Error("Course curriculum mismatch");
+  return view;
 }
 
-export function createProfile(state, settings) {
+function createProfile(state, settings) {
   const profile = emptyLearner({ settings: validateSettings(settings) });
   state.profiles[profile.id] = profile;
 }
 
-export function updateProfile(state, profileId, settings) {
-  learner(state, profileId).settings = validateSettings(settings);
+function updateProfile(state, profileId, settings) {
+  if (!state.profiles[profileId]) throw new Error("Learner not found");
+  state.profiles[profileId].settings = validateSettings(settings);
 }
 
-export function updateLearning(state, id, patch) {
+function updateLearning(state, id, patch) {
   const p = learner(state, id);
   p.learning = validateLearning({ ...p.learning, ...patch });
 }
 
-export function restorePending(state, raw) {
+function restorePending(state, raw) {
   const pending = validatePending(raw), incoming = pending.attempt;
+  if (incoming.course_id !== courseId) throw new Conflict("Pending course mismatch");
+  if (pending.format === "hearth-pending-v1") {
+    const savedAttempt = state.profiles[incoming.owner]?.courses["en-qwerty"]?.active_session;
+    if (savedAttempt?.id === incoming.id) incoming.curriculum_version = savedAttempt.curriculum_version;
+  }
   if (alreadyFinished(state, incoming.owner, incoming.id)) throw new Unchanged();
   const saved = active(learner(state, incoming.owner), incoming.id);
   for (const key of Object.keys(saved)) {
@@ -53,20 +51,17 @@ export function restorePending(state, raw) {
   else checkpointAttempt(state, incoming.owner, incoming.id, pending.checkpoint);
 }
 
-export function manageProfile(state, profileId, action) {
-  const profile = learner(state, profileId);
+function manageProfile(state, profileId, action) {
+  const profile = state.profiles[profileId];
+  if (!profile) throw new Error("Learner not found");
   if (action === "reset") {
-    state.profiles[profileId] = emptyLearner({
-      id: profileId,
-      settings: profile.settings,
-      learning: profile.learning,
-    });
+    state.profiles[profileId] = emptyLearner({ id: profileId, settings: profile.settings, courses: Object.fromEntries(Object.entries(profile.courses).map(([key, value]) => [key, { ...emptyCourse(value.curriculum_version), learning: value.learning }])) });
   } else {
     delete state.profiles[profileId];
   }
 }
 
-export function recommendationPayload(profile) {
+function recommendationPayload(profile) {
   const [keys, explanation] = recommendation(profile);
   const following = nextLesson(profile);
   const fingers = fingerReport(profile);
@@ -81,10 +76,10 @@ export function recommendationPayload(profile) {
   };
 }
 
-export function applyPlacement(state, profileId) {
+function applyPlacement(state, profileId) {
   const profile = learner(state, profileId);
   if (profile.active_session) throw new Conflict("Finish or abandon placement first");
-  const limit = [0, 80, 105, 115, 140][profile.placement_stage];
+  const limit = runtime.data.placement_limits[profile.placement_stage];
   for (const lesson of COURSE.slice(0, limit)) {
     if (!(lesson.id in profile.lesson_progress)) {
       profile.lesson_progress[lesson.id] = {
@@ -96,7 +91,7 @@ export function applyPlacement(state, profileId) {
   }
 }
 
-export function skipLesson(state, profileId, lessonId) {
+function skipLesson(state, profileId, lessonId) {
   const profile = learner(state, profileId);
   if (!(lessonId in BY_ID) || !available(profile, BY_ID[lessonId])) {
     throw new Error("Skip prerequisites in order");
@@ -110,7 +105,7 @@ export function skipLesson(state, profileId, lessonId) {
   }
 }
 
-export function selfCheck(state, profileId, lessonId, note) {
+function selfCheck(state, profileId, lessonId, note) {
   const profile = learner(state, profileId);
   if (!(lessonId in BY_ID)) throw new Error("Unknown lesson");
   profile.self_checks[lessonId] = note;
@@ -130,7 +125,7 @@ function printableCustom(text) {
   return true;
 }
 
-export function startAttempt(
+function startAttempt(
   state,
   profileId,
   {
@@ -150,6 +145,8 @@ export function startAttempt(
   const attempt = {
     id: uid(),
     owner: profileId,
+    course_id: courseId,
+    curriculum_version: runtime.data.version,
     lesson_id: null,
     kind,
     text: "f",
@@ -183,9 +180,7 @@ export function startAttempt(
       attempt.mode = lesson.mode;
     }
   } else if (kind === "custom") {
-    if (!text || !printableCustom(text)) {
-      throw new Error("Use printable US keyboard characters and newlines");
-    }
+    validateTarget(text, runtime.data.allowed_characters);
     attempt.text = text;
     attempt.mode = "fluent";
   } else if (kind === "assessment" || kind === "challenge") {
@@ -204,7 +199,7 @@ export function startAttempt(
         "Placement is complete; follow the recommendation or start at the beginning",
       );
     }
-    attempt.text = PLACEMENT_SAMPLES[profile.placement_stage];
+    attempt.text = runtime.data.placement_samples[profile.placement_stage];
     attempt.placement_stage = profile.placement_stage;
     attempt.mode = "fluent";
   } else if (kind === "familiar") {
@@ -223,18 +218,20 @@ export function startAttempt(
   }
   attempt.text = normalizeText(attempt.text);
   if (!attempt.text) throw new Error("Add some words or letters to practice");
+  validateTarget(attempt.text, runtime.data.allowed_characters);
   profile.active_session = attempt;
 }
 
-export function active(profile, attemptId) {
+function active(profile, attemptId) {
   const attempt = profile.active_session;
   if (!attempt || attempt.id !== attemptId || attempt.owner !== profile.id) {
     throw new Conflict("This attempt is no longer active for this learner");
   }
+  if (attempt.course_id !== courseId || attempt.curriculum_version !== runtime.data.version) throw new Conflict("Attempt course or curriculum mismatch");
   return attempt;
 }
 
-export function alreadyFinished(state, profileId, attemptId) {
+function alreadyFinished(state, profileId, attemptId) {
   const profile = learner(state, profileId);
   return profile.attempts.concat(profile.assessment_history).some((result) => result.id === attemptId);
 }
@@ -242,12 +239,12 @@ export function alreadyFinished(state, profileId, attemptId) {
 function eventsPrefixMatch(saved, incoming) {
   if (incoming.length < saved.length) return false;
   for (let i = 0; i < saved.length; i++) {
-    if (saved[i].key !== incoming[i].key || saved[i].ms !== incoming[i].ms) return false;
+    if (saved[i].key !== incoming[i].key || saved[i].ms !== incoming[i].ms || (saved[i].code ?? null) !== (incoming[i].code ?? null)) return false;
   }
   return true;
 }
 
-export function applyCheckpoint(attempt, body) {
+function applyCheckpoint(attempt, body) {
   if (!eventsPrefixMatch(attempt.events, body.events)) {
     throw new Conflict("Checkpoint history does not match. Reload the saved attempt.");
   }
@@ -261,66 +258,99 @@ export function applyCheckpoint(attempt, body) {
   score(attempt);
 }
 
-export function checkpointAttempt(state, profileId, attemptId, body) {
+function checkpointAttempt(state, profileId, attemptId, body) {
   applyCheckpoint(active(learner(state, profileId), attemptId), body);
 }
 
-export function finishAttempt(state, profileId, attemptId, body) {
+function finishAttempt(state, profileId, attemptId, body) {
   if (alreadyFinished(state, profileId, attemptId)) throw new Unchanged();
   const profile = learner(state, profileId);
   const attempt = active(profile, attemptId);
   applyCheckpoint(attempt, body);
+  if (attempt.lesson_id && !BY_ID[attempt.lesson_id]) throw new Error("Historical lesson unavailable; export this exercise for recovery");
   finish(profile, attempt);
 }
 
-export function abandonAttempt(state, profileId, attemptId) {
+function abandonAttempt(state, profileId, attemptId) {
   const profile = learner(state, profileId);
   active(profile, attemptId);
   profile.active_session = null;
 }
 
-export function exportState(state, profileId = null) {
+function exportState(state, profileId = null) {
   if (!profileId) return state;
+  if (!state.profiles[profileId]) throw new Error("Learner not found");
   return {
     schema_version: state.schema_version,
     revision: state.revision,
     updated_at: state.updated_at,
-    profiles: { [profileId]: learner(state, profileId) },
+    profiles: { [profileId]: state.profiles[profileId] },
   };
 }
 
-export function importPreview(incoming, mode, target) {
+function importPreview(incoming, mode, target) {
   if (mode !== "household" && Object.keys(incoming.profiles).length !== 1) {
-    throw new Error("Choose a single-learner export for this import mode");
+    throw new Error("Choose a single-learner for this import mode");
   }
   return {
     profiles: Object.values(incoming.profiles).map((item) => item.settings.name),
+    courses: Object.values(incoming.profiles).flatMap(p => Object.entries(p.courses).map(([id,c]) => ({learner:p.settings.name,id,curriculum_version:c.curriculum_version,attempts:c.attempts.length,assessments:c.assessment_history.length,passages:c.learning.passages.length,active:c.active_session != null}))),
     mode,
     replaces: mode === "replace" ? target : mode === "household" ? "entire household" : "nothing",
   };
 }
 
-export function importInto(state, incoming, mode, target) {
+function importInto(state, incoming, mode, target) {
   if (mode !== "household" && Object.keys(incoming.profiles).length !== 1) {
-    throw new Error("Choose a single-learner export for this import mode");
+    throw new Error("Choose a single-learner for this import mode");
   }
   if (mode === "household") {
-    state.profiles = incoming.profiles;
+    state.profiles = structuredClone(incoming.profiles);
     return;
   }
-  const profile = Object.values(incoming.profiles)[0];
+  const profile = structuredClone(Object.values(incoming.profiles)[0]);
   if (mode === "replace") {
     if (target == null) throw new Error("Choose a learner to replace");
-    learner(state, target);
+    if (!state.profiles[target]) throw new Error("Learner not found");
     profile.id = target;
   } else {
     profile.id = uid();
   }
-  if (profile.active_session) {
-    profile.active_session.owner = profile.id;
-    profile.active_session.id = uid();
-    profile.active_session.paused = true;
-    profile.active_session.status = "paused";
+  for (const progress of Object.values(profile.courses)) {
+    if (progress.active_session) {
+      progress.active_session.owner = profile.id;
+      progress.active_session.id = uid();
+      progress.active_session.paused = true;
+      progress.active_session.status = "paused";
+    }
   }
   state.profiles[profile.id] = profile;
 }
+
+return { learner, createProfile, updateProfile, updateLearning, restorePending, manageProfile, recommendationPayload, applyPlacement, skipLesson, selfCheck, startAttempt, active, alreadyFinished, applyCheckpoint, checkpointAttempt, finishAttempt, abandonAttempt, exportState, importPreview, importInto };
+}
+
+export function operationsFor(state, owner, courseId = "en-qwerty") {
+  const progress = state.profiles[owner]?.courses[courseId];
+  return createOperations(getCourse(courseId, progress?.curriculum_version));
+}
+export const learner = (state, owner, ...args) => operationsFor(state, owner).learner(state, owner, ...args);
+export const createProfile = (...args) => createOperations(defaultRuntime).createProfile(...args);
+export const updateProfile = (...args) => createOperations(defaultRuntime).updateProfile(...args);
+export const updateLearning = (state, owner, ...args) => operationsFor(state, owner).updateLearning(state, owner, ...args);
+export const restorePending = (state, raw) => { const courseId = raw.format === "hearth-pending-v2" ? raw.attempt.course_id : "en-qwerty"; return operationsFor(state, raw.attempt.owner, courseId).restorePending(state, raw); };
+export const manageProfile = (...args) => createOperations(defaultRuntime).manageProfile(...args);
+export const recommendationPayload = (profile) => createOperations(getCourse("en-qwerty", profile.curriculum_version)).recommendationPayload(profile);
+export const applyPlacement = (state, owner, ...args) => operationsFor(state, owner).applyPlacement(state, owner, ...args);
+export const skipLesson = (state, owner, ...args) => operationsFor(state, owner).skipLesson(state, owner, ...args);
+export const selfCheck = (state, owner, ...args) => operationsFor(state, owner).selfCheck(state, owner, ...args);
+export const startAttempt = (state, owner, ...args) => operationsFor(state, owner).startAttempt(state, owner, ...args);
+export const active = (...args) => createOperations(defaultRuntime).active(...args);
+export const alreadyFinished = (state, owner, ...args) => operationsFor(state, owner).alreadyFinished(state, owner, ...args);
+export const applyCheckpoint = (...args) => createOperations(defaultRuntime).applyCheckpoint(...args);
+export const checkpointAttempt = (state, owner, ...args) => operationsFor(state, owner).checkpointAttempt(state, owner, ...args);
+export const finishAttempt = (state, owner, ...args) => operationsFor(state, owner).finishAttempt(state, owner, ...args);
+export const abandonAttempt = (state, owner, ...args) => operationsFor(state, owner).abandonAttempt(state, owner, ...args);
+export const exportState = (...args) => createOperations(defaultRuntime).exportState(...args);
+export const importPreview = (...args) => createOperations(defaultRuntime).importPreview(...args);
+export const importInto = (...args) => createOperations(defaultRuntime).importInto(...args);

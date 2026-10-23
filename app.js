@@ -1,12 +1,13 @@
-import { checkpoint, ctx, mutate, profile, saveError, clearDraft, keepDraft, onHouseholdChange, coordinator, saveSession, restoreSession } from "./api.js";
+import { checkpoint, ctx, mutate, profile, saveError, clearDraft, keepDraft, onHouseholdChange, coordinator, saveSession, restoreSession, householdProfile, selectCourse, restoreCourseSelection, download } from "./api.js";
 import { bindTrainer, trainer } from "./trainer.js";
-import { $, applyTheme, dialog, notify, keyboardAccess } from "./ui.js";
+import { $, applyTheme, dialog, notify, keyboardAccess, esc, status } from "./ui.js";
 import { courseView, connect as connectCourse } from "./course.js";
 import { home, picker, connect as connectHome } from "./home.js";
 import { openAttempt, paint, connect as connectLesson } from "./lesson.js?v=12";
 import { progressView, connect as connectProgress } from "./progress.js";
 import { practice, results, connect as connectResults } from "./results.js";
 import { settingsView, connect as connectSettings } from "./settings.js";
+import { getCourse as bundledCourse } from "./course-registry.js";
 import { offerDraft, startupRecovery } from "./recovery.js";
 
 const MAIN_VIEWS = ["home", "course", "practice", "progress", "settings", "profiles"];
@@ -38,7 +39,66 @@ function chrome() {
   document.querySelectorAll("[data-view]").forEach((button) => {
     button.onclick = () => navigate(button.dataset.view);
   });
+  let selector = document.querySelector("#course-selector");
+  if (!selector) {
+    const label = document.createElement("label"); label.id = "course-choice";
+    label.innerHTML = 'Course <select id="course-selector" aria-label="Typing course"></select>';
+    document.querySelector("#profile-button").before(label);
+    selector = label.querySelector("select");
+  }
+  const choice = selector.closest("label");
+  choice.hidden = !profile();
+  const courseSlot = ctx.view === "lesson" ? document.querySelector(".lesson-heading") : ctx.view === "results" ? document.querySelector(".summary-bar") : null;
+  if (courseSlot) courseSlot.append(choice);
+  else document.querySelector("#profile-button").before(choice);
+  const catalog = [...ctx.catalog];
+  for (const [id, value] of Object.entries(householdProfile()?.courses || {})) if (!catalog.some(c => c.id === id)) {
+    try { const definition = bundledCourse(id,value.curriculum_version).data; catalog.push({id,title:definition.title,layout_id:definition.layout_id}); }
+    catch { catalog.push({id, title: `${id} · unavailable (version ${value.curriculum_version})`, layout_id: "unavailable"}); }
+  }
+  selector.innerHTML = catalog.map(c => `<option value="${esc(c.id)}" ${c.id === ctx.courseId ? "selected" : ""}>${esc(c.title)}</option>`).join("");
+  selector.onchange = () => switchCourse(selector.value);
+  document.querySelector("#course-context")?.remove();
+  const context = document.createElement("p"); context.id = "course-context";
+  context.textContent = profile() ? `${ctx.course?.title || ctx.courseId}` : "";
+  document.querySelector("#nav").prepend(context);
   keyboardAccess();
+}
+
+let switchingCourse = false;
+async function switchCourse(courseId) {
+  if (switchingCourse || ctx.recovering) { chrome(); return; }
+  switchingCourse = true;
+  ctx.recovering = true;
+  const main = $("#main"), wasInert = main.inert;
+  main.inert = true;
+  $("#course-selector").disabled = true;
+  try {
+    if (ctx.pendingFinish || ctx.engine?.finished) throw new Error("Save or export the pending result before switching courses.");
+    // Freeze input and the assessment clock before draining writes. Keep the
+    // lock through definition loading, so no keys can arrive after the pause
+    // acknowledgement and then disappear when the engine is replaced.
+    ctx.engine?.pause();
+    status("Saving before switching courses…");
+    await coordinator.tail;
+    if (ctx.pendingFinish || ctx.engine?.finished) throw new Error("Save or export the pending result before switching courses.");
+    if (ctx.engine) {
+      ctx.engine.pause(); await checkpoint();
+      const saved = householdProfile()?.courses[ctx.engine.attempt.course_id]?.active_session;
+      if (!saved || saved.id !== ctx.engine.attempt.id || saved.status !== "paused") throw new Error("Paused checkpoint was not acknowledged; retry or export pending work.");
+    }
+    status("Opening course…");
+    await selectCourse(courseId);
+    ctx.engine = null; ctx.pendingFinish = false; ctx.dirty = false;
+    ctx.sessionPlan = []; ctx.sessionIndex = 0; ctx.lastResult = null; ctx.lastAttempt = null;
+    restoreSession(); ctx.view = "home";
+    location.hash = "home"; await render();
+    status("Saved on this computer");
+  } catch (error) { if (ctx.engine) saveError(error); else notify(error.message); chrome(); }
+  finally {
+    ctx.recovering = false; switchingCourse = false; main.inert = wasInert;
+    if ($("#course-selector")) $("#course-selector").disabled = false;
+  }
 }
 
 export async function navigate(next, { fromHash = false } = {}) {
@@ -69,6 +129,17 @@ async function render() {
     return;
   }
   chrome();
+  if (ctx.view !== "settings" && ctx.view !== "profiles" && ctx.course.unavailable) {
+    $("#main").innerHTML = `<section class="card"><h1>${esc(ctx.courseId)} is unavailable</h1><p>Saved progress and exercises are retained. Practice requires the compatible course definition.</p><button id="unavailable-export">Export all course progress</button><button id="unavailable-settings">Backups and settings</button></section>`;
+    $("#unavailable-export").onclick = async () => download("hearth-backup.json", await trainer.exportState(ctx.profileId));
+    $("#unavailable-settings").onclick = () => navigate("settings");
+    return;
+  }
+  if (!["settings", "profiles"].includes(ctx.view) && !householdProfile().courses[ctx.courseId]) {
+    $("#main").innerHTML = `<section class="card"><h1>${esc(ctx.course.title)}</h1><p>This course has its own lessons, saved exercise and progress.</p><button id="enroll-course" class="primary">Start this course</button></section>`;
+    $("#enroll-course").onclick = async () => { try { await mutate(() => trainer.enrollCourse(ctx.profileId)); await render(); } catch (error) { notify(error.message); } };
+    return;
+  }
   if (ctx.view === "home") await home();
   else if (ctx.view === "course") courseView();
   else if (ctx.view === "practice") await practice();
@@ -264,7 +335,8 @@ matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () =>
 
 try {
   await bindTrainer();
-  [ctx.state, ctx.course] = await Promise.all([trainer.getState(), trainer.getCourse()]);
+  [ctx.state, ctx.catalog] = await Promise.all([trainer.getState(), trainer.getCatalog()]);
+  await restoreCourseSelection();
   if (profile()) { restoreSession(); await offerDraft(); }
   const initial = viewFromHash();
   if (initial === "lesson" && profile()?.active_session) ctx.view = "lesson";

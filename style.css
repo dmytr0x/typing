@@ -2159,3 +2159,33 @@ caption { text-align: left; padding: 8px 0; }
 .finger-card .tag { white-space: normal; max-width: 100%; line-height: 1.4; overflow-wrap: break-word; }
 .onboarding { margin-bottom: 16px; }
 .onboarding > details { margin-top: 16px; }
+
+#course-choice {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.8rem;
+  margin: 0;
+}
+#course-selector { max-width: 19rem; }
+.lesson-heading #course-choice { margin-top: 0.25rem; }
+.lesson-heading #course-selector {
+  max-width: min(16rem, 100%);
+  min-height: 1.75rem;
+  padding: 0.1rem 0.4rem;
+  font-size: 0.75rem;
+}
+
+.summary-bar #course-choice {
+  min-width: 0;
+  max-width: 100%;
+}
+.summary-bar #course-selector { min-width: 0; }
+@media (max-width: 700px) {
+  .summary-bar { flex-wrap: wrap; }
+  .summary-bar #course-choice { flex-basis: 100%; }
+  .summary-bar #course-selector {
+    flex: 1;
+    max-width: 100%;
+  }
+}

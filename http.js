@@ -35,7 +35,7 @@ async function request(path, method = "GET", body) {
   const preview = ["/import", "/recover/import"].includes(path) && !body?.confirm;
   const expectsState = path === "/state" || path.startsWith("/export") || method !== "GET" && !preview;
   if (expectsState) {
-    if (!data || data.schema_version !== 1 || !Number.isInteger(data.revision) || !data.profiles || typeof data.updated_at !== "string")
+    if (!data || data.schema_version !== 2 || !Number.isInteger(data.revision) || !data.profiles || typeof data.updated_at !== "string")
       throw new Error("The server returned an incomplete household. Keep your data intact and retry the connection.");
     data = validateState(data);
   }
@@ -53,31 +53,36 @@ function withRevision(body = {}) {
   return { revision: currentRevision(), ...body };
 }
 
-export function createHttpTrainer() {
+export function createHttpTrainer(courseId = "en-qwerty") {
+  const scope = (id) => `/profiles/${id}/courses/${encodeURIComponent(courseId)}`;
   return {
-    kind: "http",
+    kind: "http", courseId,
+    forCourse: (id) => createHttpTrainer(id),
+    getCatalog: () => request("/courses"),
+    enrollCourse: (id, course = courseId) => request(`/profiles/${id}/courses/${encodeURIComponent(course)}/enroll`, "POST", withRevision()),
+    resetCourse: (id) => request(`${scope(id)}/reset`, "POST", withRevision()),
     getState: () => request("/state"),
-    getCourse: () => request("/course"),
+    getCourse: (id = courseId, version) => request(`/courses/${encodeURIComponent(id)}${version == null ? "" : `?curriculum_version=${version}`}`),
     getStorageLocation: () => request("/storage"),
     createProfile: (settings) => request("/profiles", "POST", withRevision({ settings })),
     updateProfile: (id, settings) =>
       request(`/profiles/${id}`, "PUT", withRevision({ settings })),
     manageProfile: (id, action) =>
       request(`/profiles/${id}/manage/${action}`, "POST", withRevision()),
-    recommendation: (id) => request(`/profiles/${id}/recommendation`),
-    applyPlacement: (id) => request(`/profiles/${id}/placement/apply`, "POST", withRevision()),
+    recommendation: (id) => request(`${scope(id)}/recommendation`),
+    applyPlacement: (id) => request(`${scope(id)}/placement/apply`, "POST", withRevision()),
     skipLesson: (id, lessonId) =>
-      request(`/profiles/${id}/skip/${lessonId}`, "POST", withRevision()),
+      request(`${scope(id)}/skip/${lessonId}`, "POST", withRevision()),
     selfCheck: (id, lessonId, note) =>
-      request(`/profiles/${id}/self-check`, "POST", withRevision({ lesson_id: lessonId, note })),
+      request(`${scope(id)}/self-check`, "POST", withRevision({ lesson_id: lessonId, note })),
     startAttempt: (id, options) =>
-      request(`/profiles/${id}/attempts`, "POST", withRevision(options)),
+      request(`${scope(id)}/attempts`, "POST", withRevision(options)),
     checkpoint: (id, attemptId, snapshot) =>
-      request(`/profiles/${id}/attempts/${attemptId}`, "PUT", withRevision(snapshot)),
+      request(`${scope(id)}/attempts/${attemptId}`, "PUT", withRevision(snapshot)),
     finishAttempt: (id, attemptId, snapshot) =>
-      request(`/profiles/${id}/attempts/${attemptId}/finish`, "POST", withRevision(snapshot)),
+      request(`${scope(id)}/attempts/${attemptId}/finish`, "POST", withRevision(snapshot)),
     abandonAttempt: (id, attemptId) =>
-      request(`/profiles/${id}/attempts/${attemptId}/abandon`, "POST", withRevision()),
+      request(`${scope(id)}/attempts/${attemptId}/abandon`, "POST", withRevision()),
     exportState: async (profileId) => {
       const path = profileId ? `/export?profile_id=${encodeURIComponent(profileId)}` : "/export";
       return request(path);
@@ -86,7 +91,12 @@ export function createHttpTrainer() {
     recover: () => request("/recover", "POST", {}),
     recoverImport: (data, confirm = false) => request("/recover/import", "POST", { data, confirm }),
     restorePending: (pending) => request("/pending", "POST", withRevision({ pending })),
-    updateLearning: (id, patch) => request(`/profiles/${id}/learning`, "PUT", withRevision({ patch })),
+    updateLearning: (id, patch) => request(`${scope(id)}/learning`, "PUT", withRevision({ patch })),
+    downloadMigrationSnapshot: (id) => { const a=document.createElement("a");a.href=apiUrl(`/migration-snapshots/${encodeURIComponent(id)}`);a.download=id;a.click(); },
+    migrationPreparation: () => request("/migration-preparation"),
+    originalHousehold: () => request("/original-household"),
+    migrationSnapshots: () => request("/migration-snapshots"),
+    migrationSnapshot: (id) => request(`/migration-snapshots/${encodeURIComponent(id)}`),
     archives: () => request("/archives"),
     archiveState: (id) => request(`/archives/${encodeURIComponent(id)}`),
   };

@@ -1,7 +1,33 @@
-import { MIN_LESSON_LENGTH, joinPieces, normalizeText } from "./text.js";
+import { ukrainianPractice } from "./ukrainian-practice.js";
+import { MIN_LESSON_LENGTH, joinPieces, normalizeText, ensureLength } from "./text.js";
+import englishData from "./courses/en-qwerty-v2.json" with { type: "json" };
+function deepFreeze(value) {
+  if (value && typeof value === "object") {
+    for (const child of Object.values(value)) deepFreeze(child);
+    Object.freeze(value);
+  }
+  return value;
+}
+function practiceBody(focus, allowed, words, sentences, phase) {
+  const keys = [...new Set([...focus].filter(c => !" \n".includes(c)))];
+  if (!keys.length) keys.push(...allowed.trim());
+  const drill = Array.from({length:24}, (_,i) => keys[i % keys.length] + keys[(i+1) % keys.length]).join(" ");
+  const usable = words.filter(word => [...word].every(c => allowed.includes(c)));
+  const reading = sentences.filter(line => [...line].every(c => allowed.includes(c)));
+  let body = drill;
+  if (phase && usable.length) body = [...usable.slice(phase), ...usable.slice(0,phase)].join(" ");
+  if (phase >= 2 && reading.length) body = reading.join(" ");
+  const missing = keys.filter(c => !body.includes(c)).join(" ");
+  if (missing) body += " " + missing;
+  if (focus.includes("\n")) body += "\n" + drill;
+  return ensureLength(body, drill);
+}
+export function createCourseRuntime(document) {
+  const data = deepFreeze(structuredClone(document));
 
-export let CURRICULUM_VERSION = 2;
-export const FINGER_ORDER = [
+
+let CURRICULUM_VERSION = 2;
+const FINGER_ORDER = [
   "left little",
   "left ring",
   "left middle",
@@ -12,7 +38,7 @@ export const FINGER_ORDER = [
   "right little",
   "thumbs",
 ];
-export const FINGER_HOME = {
+let FINGER_HOME = {
   "left little": "a",
   "left ring": "s",
   "left middle": "d",
@@ -23,7 +49,7 @@ export const FINGER_HOME = {
   "right little": ";",
   thumbs: " ",
 };
-export const FINGER_REACHES = {
+let FINGER_REACHES = {
   "left little": "Q, Z, and 1",
   "left ring": "W, X, and 2",
   "left middle": "E, C, and 3",
@@ -34,17 +60,17 @@ export const FINGER_REACHES = {
   "right little": "P, apostrophe, slash, and 0",
   thumbs: "Space",
 };
-export const FINGER_PHASES = ["Meet the keys", "Find a rhythm", "Use your skills"];
+const FINGER_PHASES = ["Meet the keys", "Find a rhythm", "Use your skills"];
 
-const LEFT_HAND = new Set("qwertasdfgzxcvbQWERTASDFGZXCVB");
+const LEFT_HAND = new Set(data.left_hand || "qwertasdfgzxcvbQWERTASDFGZXCVB");
 const SYMBOL_CHARS = "'\"?!:-@#$%^&*()_+=[]{}\\|`~<>";
 
-export let COURSE = [];
-export const BY_ID = {};
-export let KEYBOARD = [];
-export let FINGERS = [];
-export let CHARACTER_FINGERS = new Map();
-export const POOLS = {
+let COURSE = [];
+const BY_ID = {};
+let KEYBOARD = [];
+let FINGERS = [];
+let CHARACTER_FINGERS = new Map();
+const POOLS = {
   child_words: [],
   adult_words: [],
   child_sentences: [],
@@ -82,7 +108,7 @@ function uniqueCharacters(value) {
 }
 
 function isAlpha(character) {
-  return /[A-Za-z]/.test(character);
+  return /\p{L}/u.test(character);
 }
 
 function isUpper(character) {
@@ -338,7 +364,7 @@ function lessonBody(focus, allowed, words, sentences, phase, offset = 0) {
   return ensureFocus(drill, focus);
 }
 
-export function buildKeyboard() {
+function buildKeyboard() {
   const rows = ["`1234567890-=", "qwertyuiop[]\\", "asdfghjkl;'", "zxcvbnm,./"];
   const shifted = ["~!@#$%^&*()_+", "QWERTYUIOP{}|", 'ASDFGHJKL:"', "ZXCVBNM<>?"];
   const fingers = ["0012334456777", "0123344567777", "01233445677", "0123344567"];
@@ -410,7 +436,7 @@ function characterFingersFrom(layout) {
   return mapping;
 }
 
-export function keysForFinger(finger, allowed = null) {
+function keysForFinger(finger, allowed = null) {
   let out = "";
   for (const [character, name] of CHARACTER_FINGERS) {
     if (name === finger && (allowed == null || allowed.includes(character))) {
@@ -420,7 +446,7 @@ export function keysForFinger(finger, allowed = null) {
   return out;
 }
 
-export function fingerGuide() {
+function fingerGuide() {
   return FINGER_ORDER.map((name) => ({
     id: name,
     label: fingerLabel(name),
@@ -430,7 +456,7 @@ export function fingerGuide() {
   }));
 }
 
-export function loadCourse(data) {
+function loadCourse(data) {
   COURSE = data.lessons ? [...data.lessons] : [];
   for (const key of Object.keys(BY_ID)) delete BY_ID[key];
   for (const lesson of COURSE) BY_ID[lesson.id] = lesson;
@@ -445,10 +471,12 @@ export function loadCourse(data) {
   KEYBOARD = data.keyboard ? data.keyboard : buildKeyboard();
   CHARACTER_FINGERS = characterFingersFrom(KEYBOARD);
   FINGERS = data.fingers ? data.fingers : fingerGuide();
+  FINGER_HOME = Object.fromEntries(FINGERS.map(f => [f.id, f.home]));
+  FINGER_REACHES = Object.fromEntries(FINGERS.map(f => [f.id, f.reaches]));
 }
 
-export function taught(learner) {
-  let allowed = "fj ";
+function taught(learner) {
+  let allowed = data.initial_keys || "fj ";
   for (const lesson of COURSE) {
     if (
       lesson.id in learner.lesson_progress ||
@@ -460,29 +488,33 @@ export function taught(learner) {
   return uniqueJoin(allowed);
 }
 
-export function available(learner, lesson) {
+function available(learner, lesson) {
   return lesson.prerequisite == null || lesson.prerequisite in learner.lesson_progress;
 }
 
-export function nextLesson(learner) {
+function nextLesson(learner) {
   return COURSE.find((lesson) => !(lesson.id in learner.lesson_progress)) || null;
 }
 
-export function fingerFor(character) {
+function fingerFor(character) {
   return CHARACTER_FINGERS.get(character) ?? null;
 }
 
-export function fingerLabel(finger) {
+function fingerLabel(finger) {
   return finger.slice(0, 1).toUpperCase() + finger.slice(1);
 }
 
-export function fingerInstruction(finger) {
+function fingerInstruction(finger) {
   if (!(finger in FINGER_HOME)) throw new Error("Unknown finger");
   if (finger === "thumbs") {
     return (
       "Use either thumb for Space. Keep the other fingers on home row. " +
       "Look at the text. The app cannot see which finger you used."
     );
+  }
+  if (data.id !== "en-qwerty") {
+    const item = FINGERS.find(item => item.id === finger);
+    return `Your ${finger} rests on ${item.home.toUpperCase()}. Reach to ${item.reaches} and return home. The app cannot see which finger you used.`;
   }
   const home = FINGER_HOME[finger].toUpperCase();
   return (
@@ -492,14 +524,16 @@ export function fingerInstruction(finger) {
   );
 }
 
-export function fingerTitle(finger, phase) {
+function fingerTitle(finger, phase) {
   if (!(finger in FINGER_HOME)) throw new Error("Unknown finger");
   const label =
     phase >= 0 && phase < FINGER_PHASES.length ? FINGER_PHASES[phase] : "Practice";
   return `${label}: ${fingerLabel(finger)} finger`;
 }
 
-export function focusedPracticeText(focus, allowed, { band = "child", phase = 0 } = {}) {
+function focusedPracticeText(focus, allowed, { band = "child", phase = 0 } = {}) {
+  if (data.id === "uk-macos") return ukrainianPractice(focus, allowed, POOLS[`${band}_words`], POOLS[`${band}_sentences`], Math.min(Math.max(phase, 0), 4));
+  if (data.id === "uk-ua") return practiceBody(focus, allowed, POOLS[`${band}_words`], POOLS[`${band}_sentences`], Math.min(Math.max(phase, 0), 4));
   const words = band === "adult" ? POOLS.adult_words : POOLS.child_words;
   const sentences = band === "adult" ? POOLS.adult_sentences : POOLS.child_sentences;
   return lessonBody(focus, allowed, words, sentences, Math.min(Math.max(phase, 0), 4));
@@ -508,3 +542,15 @@ export function focusedPracticeText(focus, allowed, { band = "child", phase = 0 
 KEYBOARD = buildKeyboard();
 CHARACTER_FINGERS = characterFingersFrom(KEYBOARD);
 FINGERS = fingerGuide();
+
+  loadCourse(data);
+  return deepFreeze({data, CURRICULUM_VERSION, FINGER_ORDER, FINGER_HOME, FINGER_REACHES, FINGER_PHASES, COURSE, BY_ID, KEYBOARD, FINGERS, POOLS, buildKeyboard, keysForFinger, fingerGuide, taught, available, nextLesson, fingerFor, fingerLabel, fingerInstruction, fingerTitle, focusedPracticeText,
+    CHARACTER_FINGERS: { get: key => CHARACTER_FINGERS.get(key), has: key => CHARACTER_FINGERS.has(key), [Symbol.iterator]: () => CHARACTER_FINGERS[Symbol.iterator]() }
+  });
+}
+const english = createCourseRuntime(englishData);
+// Legacy module imports are fixed to English. Loading a course returns a new
+// instance and cannot redirect a concurrent attempt or recovery operation.
+export function loadCourse(data) { return createCourseRuntime(data); }
+export const { CURRICULUM_VERSION, FINGER_ORDER, FINGER_HOME, FINGER_REACHES, FINGER_PHASES, COURSE, BY_ID, KEYBOARD, FINGERS, POOLS, buildKeyboard, keysForFinger, fingerGuide, taught, available, nextLesson, fingerFor, fingerLabel, fingerInstruction, fingerTitle, focusedPracticeText, CHARACTER_FINGERS } = english;
+export const defaultRuntime = english;

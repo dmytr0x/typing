@@ -54,3 +54,44 @@ export function migrateState(state) {
   }
   return changed;
 }
+
+import { validateState as validateLegacyState } from "./legacy-validate.js";
+import { COURSE_FIELDS, validateState } from "./validate.js";
+export const MIGRATION_ID = "courses-schema-1-to-2";
+export function canonical(value) {
+  if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`;
+  if (value !== null && typeof value === "object") return `{${Object.keys(value).sort().map(key => `${JSON.stringify(key)}:${canonical(value[key])}`).join(",")}}`;
+  return JSON.stringify(value);
+}
+export function legacyProjection(state) {
+  const projected = structuredClone(state);
+  projected.schema_version = 1;
+  for (const profile of Object.values(projected.profiles)) {
+    if (canonical(Object.keys(profile.courses)) !== '["en-qwerty"]') throw new Error("Migration created unexpected course");
+    const progress = profile.courses["en-qwerty"];
+    delete profile.courses;
+    for (const record of [...progress.attempts, ...progress.assessment_history, ...(progress.active_session ? [progress.active_session] : [])]) {
+      if (record.course_id !== "en-qwerty" || record.curriculum_version !== progress.curriculum_version) throw new Error("Migration identity mismatch");
+      delete record.course_id; delete record.curriculum_version;
+    }
+    Object.assign(profile, progress);
+  }
+  return projected;
+}
+export function upgradeState(raw) {
+  if (raw?.schema_version === 2) return validateState(raw);
+  if (!raw || (raw.schema_version ?? 1) !== 1) throw new Error("Unsupported household schema; keep data and reload a compatible release");
+  const original = validateLegacyState(raw);
+  const candidate = structuredClone(original);
+  candidate.schema_version = 2;
+  for (const profile of Object.values(candidate.profiles)) {
+    if (canonical(Object.keys(profile).sort()) !== canonical(["id", "settings", ...COURSE_FIELDS].sort())) throw new Error("Learner field needs a migration decision");
+    const progress = {};
+    for (const key of COURSE_FIELDS) { progress[key] = profile[key]; delete profile[key]; }
+    for (const record of [...progress.attempts, ...progress.assessment_history, ...(progress.active_session ? [progress.active_session] : [])]) Object.assign(record, { course_id: "en-qwerty", curriculum_version: progress.curriculum_version });
+    profile.courses = { "en-qwerty": progress };
+  }
+  const result = validateState(candidate);
+  if (canonical(legacyProjection(result)) !== canonical(original)) throw new Error("Course migration preservation check failed; no data written");
+  return result;
+}

@@ -40,7 +40,7 @@ function notesFrom(attempt) {
     const finger = (ctx.course?.fingers || []).find((item) =>
       item.keys.includes(missed[0]),
     );
-    if (finger) notes.push(`That key is assigned to the ${finger.id} finger on US QWERTY.`);
+    if (finger) notes.push(`That key is assigned to the ${finger.id} finger on ${ctx.course.title}.`);
   }
   const swap = Object.entries(swaps).sort((a, b) => b[1] - a[1])[0];
   if (swap) {
@@ -86,7 +86,7 @@ function previousBest(result) {
     ...profile()
       .attempts.filter(
         (row) =>
-          row.id !== result.id &&
+          row.id !== result.id && row.course_id === result.course_id && row.curriculum_version === result.curriculum_version &&
           row.kind === result.kind && row.lesson_id === result.lesson_id &&
           row.duration === result.duration && row.paused === result.paused &&
           (["assessment", "challenge"].includes(result.kind)
@@ -183,7 +183,7 @@ export function results() {
   document.body.classList.remove("lesson-mode");
   const result = ctx.lastResult,
     score = result.score,
-    item = lesson(result.lesson_id);
+    item = lesson(result.lesson_id, result.curriculum_version, result.course_id);
   const specific = notesFrom(ctx.lastAttempt);
   const tip = specific.length
     ? specific.join(" ")
