@@ -261,7 +261,6 @@ export function results() {
       <div class="summary-follow">
         <div class="banner">${esc(tip)}</div>
         ${result.kind === "placement" ? `<p>Placement sampled ${profile().placement_stage} of 4 skill groups successfully. ${profile().placement_done ? "Use the recommendation to begin with untested keys, or start from the beginning. Demonstrated groups are marked skipped, not mastered." : "Continue to sample the next group."}</p>` : ""}
-        ${result.lesson_id?.endsWith("-5") ? `<label><input id="look-down" type="checkbox"> I did not look down (optional note, not proof of technique)</label>` : ""}
         <div class="actions">
           <button id="recommended-next" class="primary">${!result.passed && result.lesson_id ? "Practice this lesson again" : hasNext ? "Continue →" : "Done"}</button>
           ${!result.passed && result.lesson_id ? `<button id="result-continue">${hasNext ? "Continue →" : "Done"}</button>` : ""}
@@ -338,14 +337,6 @@ export function results() {
     saveSession();
     return navigate("home");
   });
-  const box = document.querySelector("#look-down");
-  if (box)
-    box.onchange = async () => {
-      if (!box.checked) return;
-      await mutate(() =>
-        trainer.selfCheck(ctx.profileId, result.lesson_id, "I did not look down"),
-      );
-    };
   document.querySelector("#recommended-next")?.focus({ preventScroll: true });
 }
 
